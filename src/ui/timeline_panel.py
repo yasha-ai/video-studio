@@ -28,7 +28,8 @@ class TimelinePanel(ctk.CTkFrame):
         self.on_video_edited = on_video_edited
         
         # Создаём менеджер артефактов для временных файлов
-        self.artifacts = ArtifactsManager()
+        # Используем временное имя, которое обновится при загрузке видео
+        self.artifacts = ArtifactsManager(project_name="timeline_edit")
         self.processor = VideoProcessor(self.artifacts)
         
         # Данные проекта
@@ -191,6 +192,11 @@ class TimelinePanel(ctk.CTkFrame):
     def load_video(self, video_path: Path):
         """Загрузить видео для редактирования"""
         self.video_path = video_path
+        
+        # Обновляем имя проекта на основе имени видео
+        video_name = video_path.stem  # Имя файла без расширения
+        self.artifacts = ArtifactsManager(project_name=f"{video_name}_edit")
+        self.processor.artifacts = self.artifacts
         
         # Получить длительность видео через VideoProcessor
         try:

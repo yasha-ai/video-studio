@@ -76,7 +76,8 @@ class MainWindow(ctk.CTk):
         """Инициализация всех процессоров"""
         try:
             # Создаём менеджер артефактов (для хранения промежуточных файлов)
-            self.artifacts = ArtifactsManager()
+            # Используем дефолтное имя проекта, которое можно изменить при загрузке видео
+            self.artifacts = ArtifactsManager(project_name="untitled_project")
             
             # Инициализируем процессоры
             self.video_processor = VideoProcessor(self.artifacts)
@@ -511,6 +512,12 @@ class MainWindow(ctk.CTk):
         
         if filepath:
             self.project["video_path"] = filepath
+            
+            # Обновляем имя проекта в artifacts manager на основе имени видео
+            video_name = Path(filepath).stem  # Имя файла без расширения
+            self.artifacts = ArtifactsManager(project_name=video_name)
+            self.video_processor.artifacts = self.artifacts
+            
             self._update_status(f"Loaded: {Path(filepath).name}")
             messagebox.showinfo("Success", f"Video loaded:\n{Path(filepath).name}")
             self._show_import_panel()  # Refresh panel
