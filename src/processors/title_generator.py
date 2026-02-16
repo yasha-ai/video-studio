@@ -51,11 +51,12 @@ class TitleGenerator:
             api_key: Google Gemini API key (or loaded from env GOOGLE_GEMINI_API_KEY)
         """
         self.api_key = api_key or os.getenv('GOOGLE_GEMINI_API_KEY')
-        if not self.api_key:
-            raise ValueError(
-                "Google Gemini API key required. "
-                "Set GOOGLE_GEMINI_API_KEY env variable or pass api_key parameter."
-            )
+        # Note: API key is optional at init time, can be set later via set_api_key()
+        # Methods will check for key before making API calls
+    
+    def set_api_key(self, api_key: str):
+        """Set or update the Gemini API key."""
+        self.api_key = api_key
     
     def generate_titles(
         self,
@@ -356,8 +357,14 @@ Return ONLY the {count} improved titles, one per line, numbered 1-{count}.
             Response text
         
         Raises:
-            RuntimeError: If API call fails
+            RuntimeError: If API call fails or API key not set
         """
+        if not self.api_key:
+            raise RuntimeError(
+                "Google Gemini API key not set. "
+                "Please configure it in Settings or set GOOGLE_GEMINI_API_KEY environment variable."
+            )
+        
         headers = {
             'Content-Type': 'application/json'
         }

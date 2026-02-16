@@ -42,20 +42,23 @@ class GeminiTranscriber:
             model: Model name (default: gemini-2.5-flash)
             progress_callback: Callback(progress, status) for UI updates
         """
-        api_key = api_key or os.getenv("GOOGLE_GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError(
-                "Gemini API key required. "
-                "Set GOOGLE_GEMINI_API_KEY environment variable or pass api_key parameter."
-            )
-        
+        self.api_key = api_key or os.getenv("GOOGLE_GEMINI_API_KEY")
         self.model_name = model
         self.progress_callback = progress_callback
         
-        # Initialize Gemini client (new API)
-        self.client = genai.Client(api_key=api_key)
+        # Initialize Gemini client (new API) if API key is available
+        self.client = genai.Client(api_key=self.api_key) if self.api_key else None
         
-        logger.info(f"GeminiTranscriber initialized with model: {model}")
+        if self.client:
+            logger.info(f"GeminiTranscriber initialized with model: {model}")
+        else:
+            logger.warning("GeminiTranscriber initialized without API key - methods will require key to be set")
+    
+    def set_api_key(self, api_key: str):
+        """Set or update the Gemini API key and reinitialize client."""
+        self.api_key = api_key
+        self.client = genai.Client(api_key=api_key)
+        logger.info("Gemini API key updated")
     
     def _update_progress(self, progress: float, status: str):
         """Update progress via callback."""
@@ -82,6 +85,12 @@ class GeminiTranscriber:
         """
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        
+        if not self.client:
+            raise RuntimeError(
+                "Google Gemini API key not set. "
+                "Please configure it in Settings or set GOOGLE_GEMINI_API_KEY environment variable."
+            )
         
         self._update_progress(0.1, "Uploading audio file...")
         
@@ -146,6 +155,12 @@ class GeminiTranscriber:
         Returns:
             Fixed transcription text
         """
+        if not self.client:
+            raise RuntimeError(
+                "Google Gemini API key not set. "
+                "Please configure it in Settings."
+            )
+        
         self._update_progress(0.1, "Fixing transcription...")
         
         prompt = f"""Fix the following transcription text:
@@ -201,6 +216,12 @@ Fixed transcription:"""
         Returns:
             List of timestamp segments: [{"start": 0.0, "end": 5.2, "text": "..."}]
         """
+        if not self.client:
+            raise RuntimeError(
+                "Google Gemini API key not set. "
+                "Please configure it in Settings."
+            )
+        
         self._update_progress(0.1, "Generating timestamps...")
         
         prompt = f"""Given the transcription below, generate logical segments with approximate timestamps.
@@ -262,6 +283,12 @@ Timestamps JSON:"""
         Returns:
             List of highlights: [{"timestamp": "00:05", "text": "...", "reason": "..."}]
         """
+        if not self.client:
+            raise RuntimeError(
+                "Google Gemini API key not set. "
+                "Please configure it in Settings."
+            )
+        
         self._update_progress(0.1, "Extracting highlights...")
         
         prompt = f"""Analyze the following transcription and extract the {max_highlights} most important highlights.
