@@ -10,12 +10,8 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
-
-try:
-    from google import genai
-except ImportError:
-    # Fallback to old package for backward compatibility
-    import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +42,8 @@ class GeminiTranscriber:
             model: Model name (default: gemini-2.5-flash)
             progress_callback: Callback(progress, status) for UI updates
         """
-        self.api_key = api_key or os.getenv("GOOGLE_GEMINI_API_KEY")
-        if not self.api_key:
+        api_key = api_key or os.getenv("GOOGLE_GEMINI_API_KEY")
+        if not api_key:
             raise ValueError(
                 "Gemini API key required. "
                 "Set GOOGLE_GEMINI_API_KEY environment variable or pass api_key parameter."
@@ -56,9 +52,8 @@ class GeminiTranscriber:
         self.model_name = model
         self.progress_callback = progress_callback
         
-        # Configure Gemini
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel(model)
+        # Initialize Gemini client (new API)
+        self.client = genai.Client(api_key=api_key)
         
         logger.info(f"GeminiTranscriber initialized with model: {model}")
     
@@ -92,17 +87,17 @@ class GeminiTranscriber:
         
         # Upload file to Gemini
         try:
-            uploaded_file = genai.upload_file(str(audio_path))
+            uploaded_file = self.client.files.upload(file=str(audio_path))
             self._update_progress(0.3, "Audio uploaded, waiting for processing...")
             
             # Wait for file to be processed
-            while uploaded_file.state.name == "PROCESSING":
-                import time
+            import time
+            while uploaded_file.state == "PROCESSING":
                 time.sleep(1)
-                uploaded_file = genai.get_file(uploaded_file.name)
+                uploaded_file = self.client.files.get(name=uploaded_file.name)
             
-            if uploaded_file.state.name == "FAILED":
-                raise RuntimeError(f"File processing failed: {uploaded_file.state}")
+            if uploaded_file.state == "FAILED":
+                raise RuntimeError(f"File processing failed")
             
             self._update_progress(0.5, "Transcribing audio...")
             
@@ -115,7 +110,10 @@ class GeminiTranscriber:
             )
             
             # Generate transcription
-            response = self.model.generate_content([uploaded_file, prompt])
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[uploaded_file, prompt]
+            )
             transcription = response.text.strip()
             
             self._update_progress(0.9, "Transcription complete")
@@ -165,7 +163,10 @@ Transcription:
 Fixed transcription:"""
         
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
             fixed_text = response.text.strip()
             
             self._update_progress(0.9, "Transcription fixed")
@@ -212,7 +213,10 @@ Transcription:
 Timestamps JSON:"""
         
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
             response_text = response.text.strip()
             
             # Extract JSON from response (remove markdown code blocks if present)
@@ -274,7 +278,10 @@ Transcription:
 Highlights JSON:"""
         
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt
+            )
             response_text = response.text.strip()
             
             # Extract JSON from response
