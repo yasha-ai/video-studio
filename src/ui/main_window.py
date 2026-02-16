@@ -8,15 +8,27 @@ from tkinter import filedialog, messagebox
 import threading
 
 # Импорт модулей обработки
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-
-from processors.video_processor import VideoProcessor
-from processors.whisper_transcriber import WhisperTranscriber
-from processors.audio_cleanup import AudioCleanup
-from processors.title_generator import TitleGenerator
-from processors.cover_generator import CoverGenerator
-from youtube.uploader import YouTubeUploader
+# Пытаемся использовать относительные импорты (если запущен как пакет)
+# Иначе используем абсолютные импорты (если запущен напрямую)
+try:
+    from ..processors.video_processor import VideoProcessor
+    from ..processors.whisper_transcriber import WhisperTranscriber
+    from ..processors.audio_cleanup import AudioCleanup
+    from ..processors.title_generator import TitleGenerator
+    from ..processors.cover_generator import CoverGenerator
+    from ..youtube.uploader import YouTubeUploader
+except ImportError:
+    # Fallback для абсолютных импортов
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    
+    from processors.video_processor import VideoProcessor
+    from processors.whisper_transcriber import WhisperTranscriber
+    from processors.audio_cleanup import AudioCleanup
+    from processors.title_generator import TitleGenerator
+    from processors.cover_generator import CoverGenerator
+    from youtube.uploader import YouTubeUploader
 
 
 class MainWindow(ctk.CTk):

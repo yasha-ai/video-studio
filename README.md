@@ -20,18 +20,49 @@ Video Studio — Python-приложение с графическим инте�
 - **Google Gemini API** — AI генерация
 - **google-api-python-client** — YouTube интеграция
 
+## Требования
+
+- **Python 3.10+**
+- **FFmpeg** (для видеообработки)
+
+### Установка FFmpeg
+
+**macOS:**
+```bash
+brew install ffmpeg
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt install ffmpeg
+```
+
+**Windows:**
+Скачайте с [ffmpeg.org](https://ffmpeg.org/download.html) и добавьте в PATH.
+
 ## Установка
 
 ```bash
+# 1. Клонировать репозиторий
+git clone https://github.com/yasha-ai/video-studio.git
+cd video-studio
+
+# 2. Создать виртуальное окружение
 python3 -m venv venv
-source venv/bin/activate
+source venv/bin/activate  # На Windows: venv\Scripts\activate
+
+# 3. Установить зависимости
 pip install -r requirements.txt
 ```
 
 ## Запуск
 
 ```bash
-python src/main.py
+# Из корня проекта (рекомендуется)
+python3 -m src.main
+
+# Или прямой запуск
+python3 src/main.py
 ```
 
 ## Документация

@@ -10,7 +10,12 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
-import google.generativeai as genai
+
+try:
+    from google import genai
+except ImportError:
+    # Fallback to old package for backward compatibility
+    import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 

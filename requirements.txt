@@ -8,7 +8,7 @@ moviepy==1.0.3
 
 # Transcription
 openai-whisper>=20240930
-google-generativeai>=0.8.3
+google-genai>=1.0.0  # New Gemini package (replaces google-generativeai)
 
 # Audio Processing
 pydub==0.25.1
