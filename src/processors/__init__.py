@@ -8,6 +8,7 @@ from .video_processor import VideoProcessor
 from .cover_generator import CoverGenerator
 from .youtube_uploader import YouTubeUploader
 from .whisper_transcriber import WhisperTranscriber
+from .gemini_transcriber import GeminiTranscriber
 from .audio_cleanup import AudioCleanup
 from .title_generator import TitleGenerator
 
@@ -16,6 +17,7 @@ __all__ = [
     "CoverGenerator",
     "YouTubeUploader",
     "WhisperTranscriber",
+    "GeminiTranscriber",
     "AudioCleanup",
     "TitleGenerator"
 ]
