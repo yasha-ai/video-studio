@@ -16,7 +16,7 @@ try:
     from ..processors.audio_cleanup import AudioCleanup
     from ..processors.title_generator import TitleGenerator
     from ..processors.cover_generator import CoverGenerator
-    from ..youtube.uploader import YouTubeUploader
+    from ..processors.youtube_uploader import YouTubeUploader
 except ImportError:
     # Fallback для абсолютных импортов
     import sys
@@ -28,7 +28,7 @@ except ImportError:
     from processors.audio_cleanup import AudioCleanup
     from processors.title_generator import TitleGenerator
     from processors.cover_generator import CoverGenerator
-    from youtube.uploader import YouTubeUploader
+    from processors.youtube_uploader import YouTubeUploader
 
 
 class MainWindow(ctk.CTk):
