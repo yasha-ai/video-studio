@@ -1,14 +1,14 @@
 # UI Framework
 customtkinter==5.2.2
-pillow==10.2.0
+pillow>=10.3.0
 
 # Video Processing
 ffmpeg-python==0.2.0
 moviepy==1.0.3
 
 # Transcription
-openai-whisper==20231117
-google-generativeai==0.8.3
+openai-whisper>=20240930
+google-generativeai>=0.8.3
 
 # Audio Processing
 pydub==0.25.1
