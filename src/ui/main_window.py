@@ -11,6 +11,7 @@ import threading
 # Пытаемся использовать относительные импорты (если запущен как пакет)
 # Иначе используем абсолютные импорты (если запущен напрямую)
 try:
+    from ..core.artifacts import ArtifactsManager
     from ..processors.video_processor import VideoProcessor
     from ..processors.whisper_transcriber import WhisperTranscriber
     from ..processors.audio_cleanup import AudioCleanup
@@ -23,6 +24,7 @@ except ImportError:
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent.parent))
     
+    from core.artifacts import ArtifactsManager
     from processors.video_processor import VideoProcessor
     from processors.whisper_transcriber import WhisperTranscriber
     from processors.audio_cleanup import AudioCleanup
@@ -73,7 +75,11 @@ class MainWindow(ctk.CTk):
     def _init_processors(self):
         """Инициализация всех процессоров"""
         try:
-            self.video_processor = VideoProcessor()
+            # Создаём менеджер артефактов (для хранения промежуточных файлов)
+            self.artifacts = ArtifactsManager()
+            
+            # Инициализируем процессоры
+            self.video_processor = VideoProcessor(self.artifacts)
             self.whisper = WhisperTranscriber()
             self.audio_cleanup = AudioCleanup()
             self.title_generator = TitleGenerator()

@@ -10,6 +10,7 @@ from typing import Optional, Callable
 import sys
 
 sys.path.append(str(Path(__file__).parent.parent))
+from core.artifacts import ArtifactsManager
 from processors.video_processor import VideoProcessor
 
 
@@ -25,7 +26,10 @@ class TimelinePanel(ctk.CTkFrame):
         super().__init__(parent, **kwargs)
         
         self.on_video_edited = on_video_edited
-        self.processor = VideoProcessor()
+        
+        # Создаём менеджер артефактов для временных файлов
+        self.artifacts = ArtifactsManager()
+        self.processor = VideoProcessor(self.artifacts)
         
         # Данные проекта
         self.video_path: Optional[Path] = None
