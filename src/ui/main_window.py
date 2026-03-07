@@ -1,5 +1,5 @@
 """
-Main Window - Главное окно приложения Video Studio (с интеграцией модулей)
+Main Window - Главное окно приложения Video Studio (Modern UI)
 """
 
 import customtkinter as ctk
@@ -7,9 +7,6 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 import threading
 
-# Импорт модулей обработки
-# Пытаемся использовать относительные импорты (если запущен как пакет)
-# Иначе используем абсолютные импорты (если запущен напрямую)
 try:
     from ..core.artifacts import ArtifactsManager
     from ..processors.video_processor import VideoProcessor
@@ -19,11 +16,8 @@ try:
     from ..processors.cover_generator import CoverGenerator
     from ..processors.youtube_uploader import YouTubeUploader
 except ImportError:
-    # Fallback для абсолютных импортов
     import sys
-    from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent.parent))
-    
     from core.artifacts import ArtifactsManager
     from processors.video_processor import VideoProcessor
     from processors.whisper_transcriber import WhisperTranscriber
@@ -33,24 +27,52 @@ except ImportError:
     from processors.youtube_uploader import YouTubeUploader
 
 
+# --- Color palette ---
+C = {
+    "bg":           "#0f0f0f",
+    "surface":      "#1a1a1a",
+    "surface2":     "#242424",
+    "surface3":     "#2e2e2e",
+    "border":       "#333333",
+    "text":         "#e8e8e8",
+    "text2":        "#999999",
+    "text3":        "#666666",
+    "accent":       "#6c5ce7",
+    "accent_hover": "#5a4bd1",
+    "accent_dim":   "#3d3566",
+    "green":        "#00b894",
+    "green_dim":    "#1a3d33",
+    "red":          "#ff6b6b",
+    "orange":       "#fdcb6e",
+    "blue":         "#74b9ff",
+}
+
+
 class MainWindow(ctk.CTk):
     """Главное окно приложения"""
-    
+
+    STEPS = [
+        {"id": "import",    "icon": "01", "label": "Import",     "method": "_show_import_panel"},
+        {"id": "edit",      "icon": "02", "label": "Edit & Trim","method": "_show_edit_panel"},
+        {"id": "transcribe","icon": "03", "label": "Transcribe", "method": "_show_transcribe_panel"},
+        {"id": "audio",     "icon": "04", "label": "Clean Audio","method": "_show_audio_cleanup_panel"},
+        {"id": "titles",    "icon": "05", "label": "Titles",     "method": "_show_titles_panel"},
+        {"id": "thumbnail", "icon": "06", "label": "Thumbnail",  "method": "_show_thumbnail_panel"},
+        {"id": "preview",   "icon": "07", "label": "Preview",    "method": "_show_preview_panel"},
+        {"id": "upload",    "icon": "08", "label": "Upload",     "method": "_show_upload_panel"},
+    ]
+
     def __init__(self):
         super().__init__()
-        
-        # Настройка окна
-        self.title("Video Studio — YouTube Video Editor")
-        self.geometry("1400x900")
+
+        self.title("Video Studio")
+        self.geometry("1440x900")
         self.minsize(1200, 700)
-        
-        # Центрируем окно на экране
+        self.configure(fg_color=C["bg"])
+
         self._center_window()
-        
-        # Инициализация обработчиков
         self._init_processors()
-        
-        # Хранилище данных проекта
+
         self.project = {
             "video_path": None,
             "audio_path": None,
@@ -59,562 +81,671 @@ class MainWindow(ctk.CTk):
             "selected_title": None,
             "thumbnail_path": None,
         }
-        
-        # Инициализация UI
+
+        self.completed_steps: set[str] = set()
+        self.active_step: str = "import"
+        self._sidebar_buttons: dict[str, ctk.CTkButton] = {}
+        self._sidebar_badges: dict[str, ctk.CTkLabel] = {}
+
         self._setup_ui()
-        
+
+    # ══════════════════════════════════════════
+    #  Init
+    # ══════════════════════════════════════════
+
     def _center_window(self):
-        """Центрирование окна на экране"""
         self.update_idletasks()
-        width = self.winfo_width()
-        height = self.winfo_height()
-        x = (self.winfo_screenwidth() // 2) - (width // 2)
-        y = (self.winfo_screenheight() // 2) - (height // 2)
-        self.geometry(f'{width}x{height}+{x}+{y}')
-    
+        w, h = 1440, 900
+        x = (self.winfo_screenwidth() - w) // 2
+        y = (self.winfo_screenheight() - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
     def _init_processors(self):
-        """Инициализация всех процессоров"""
         try:
-            # Создаём менеджер артефактов (для хранения промежуточных файлов)
-            # Используем дефолтное имя проекта, которое можно изменить при загрузке видео
             self.artifacts = ArtifactsManager(project_name="untitled_project")
-            
-            # Инициализируем процессоры
             self.video_processor = VideoProcessor(self.artifacts)
             self.whisper = WhisperTranscriber()
             self.audio_cleanup = AudioCleanup()
             self.title_generator = TitleGenerator()
             self.cover_generator = CoverGenerator()
-            # YouTubeUploader требует OAuth, инициализируем позже
             self.youtube_uploader = None
         except Exception as e:
-            print(f"⚠️ Ошибка инициализации процессоров: {e}")
-        
+            print(f"Warning: processor init error: {e}")
+
+    # ══════════════════════════════════════════
+    #  UI Setup
+    # ══════════════════════════════════════════
+
     def _setup_ui(self):
-        """Создание интерфейса"""
-        
-        # === ВЕРХНЯЯ ПАНЕЛЬ (Header) ===
-        self.header_frame = ctk.CTkFrame(self, height=60, corner_radius=0)
-        self.header_frame.pack(fill="x", side="top")
-        self.header_frame.pack_propagate(False)
-        
-        # Логотип и название
-        self.logo_label = ctk.CTkLabel(
-            self.header_frame,
-            text="🎬 VIDEO STUDIO",
-            font=ctk.CTkFont(size=24, weight="bold"),
+        # Sidebar
+        self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color=C["surface"])
+        self.sidebar.pack(fill="y", side="left")
+        self.sidebar.pack_propagate(False)
+
+        # Logo
+        logo_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        logo_frame.pack(fill="x", padx=20, pady=(28, 8))
+
+        ctk.CTkLabel(
+            logo_frame, text="VIDEO STUDIO",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=C["text"],
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            logo_frame, text="Professional video pipeline",
+            font=ctk.CTkFont(size=11),
+            text_color=C["text3"],
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Divider
+        ctk.CTkFrame(self.sidebar, height=1, fg_color=C["border"]).pack(fill="x", padx=16, pady=(16, 12))
+
+        # Steps
+        for step in self.STEPS:
+            self._create_sidebar_step(step)
+
+        # Bottom area
+        bottom = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        bottom.pack(fill="x", side="bottom", padx=16, pady=16)
+
+        ctk.CTkFrame(self.sidebar, height=1, fg_color=C["border"]).pack(
+            fill="x", padx=16, side="bottom", pady=(0, 8)
         )
-        self.logo_label.pack(side="left", padx=20)
-        
-        # Кнопки верхнего меню
-        self.menu_frame = ctk.CTkFrame(self.header_frame, fg_color="transparent")
-        self.menu_frame.pack(side="right", padx=20)
-        
-        menu_buttons = [
-            ("⚙️ Settings", self._open_settings),
-            ("❓ Help", self._open_help),
-        ]
-        
-        for text, command in menu_buttons:
-            btn = ctk.CTkButton(
-                self.menu_frame,
-                text=text,
-                width=100,
-                command=command,
-                fg_color="transparent",
-                hover_color=("gray70", "gray30"),
-            )
-            btn.pack(side="left", padx=5)
-        
-        # === БОКОВАЯ ПАНЕЛЬ (Sidebar) ===
-        self.sidebar_frame = ctk.CTkFrame(self, width=250, corner_radius=0)
-        self.sidebar_frame.pack(fill="y", side="left")
-        self.sidebar_frame.pack_propagate(False)
-        
-        # Заголовок боковой панели
-        self.sidebar_title = ctk.CTkLabel(
-            self.sidebar_frame,
-            text="Workflow Steps",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        )
-        self.sidebar_title.pack(pady=20)
-        
-        # Список этапов работы
-        self.workflow_steps = [
-            ("📁 Import Video", self._show_import_panel),
-            ("✂️ Edit & Trim", self._show_edit_panel),
-            ("🎤 Transcribe", self._show_transcribe_panel),
-            ("🧹 Clean Audio", self._show_audio_cleanup_panel),
-            ("📝 Generate Titles", self._show_titles_panel),
-            ("🎨 Create Thumbnail", self._show_thumbnail_panel),
-            ("▶️ Preview", self._show_preview_panel),
-            ("📤 Upload to YouTube", self._show_upload_panel),
-        ]
-        
-        for step_name, command in self.workflow_steps:
-            btn = ctk.CTkButton(
-                self.sidebar_frame,
-                text=step_name,
-                anchor="w",
-                height=40,
-                fg_color="transparent",
-                text_color=("gray10", "gray90"),
-                hover_color=("gray70", "gray30"),
-                command=command,
-            )
-            btn.pack(fill="x", padx=10, pady=5)
-        
-        # === ОСНОВНАЯ ОБЛАСТЬ (Main Content) ===
-        self.content_frame = ctk.CTkFrame(self, corner_radius=0)
-        self.content_frame.pack(fill="both", expand=True, side="left")
-        
-        # Приветственный экран
-        self._show_welcome_screen()
-        
-        # === НИЖНЯЯ ПАНЕЛЬ (Status Bar) ===
-        self.status_bar = ctk.CTkFrame(self, height=30, corner_radius=0)
-        self.status_bar.pack(fill="x", side="bottom")
-        self.status_bar.pack_propagate(False)
-        
-        self.status_label = ctk.CTkLabel(
-            self.status_bar,
-            text="Ready",
+
+        settings_btn = ctk.CTkButton(
+            bottom, text="Settings",
             font=ctk.CTkFont(size=12),
+            fg_color="transparent", text_color=C["text2"],
+            hover_color=C["surface3"], height=32, anchor="w",
+            command=self._open_settings,
         )
-        self.status_label.pack(side="left", padx=10)
-    
-    # ========== ЭКРАНЫ WORKFLOW ==========
-    
+        settings_btn.pack(fill="x", pady=(0, 4))
+
+        help_btn = ctk.CTkButton(
+            bottom, text="Help",
+            font=ctk.CTkFont(size=12),
+            fg_color="transparent", text_color=C["text2"],
+            hover_color=C["surface3"], height=32, anchor="w",
+            command=self._open_help,
+        )
+        help_btn.pack(fill="x")
+
+        # Main area wrapper
+        main_wrapper = ctk.CTkFrame(self, fg_color=C["bg"], corner_radius=0)
+        main_wrapper.pack(fill="both", expand=True, side="left")
+
+        # Top bar
+        self.topbar = ctk.CTkFrame(main_wrapper, height=52, fg_color=C["surface"], corner_radius=0)
+        self.topbar.pack(fill="x")
+        self.topbar.pack_propagate(False)
+
+        self.topbar_title = ctk.CTkLabel(
+            self.topbar, text="Import Video",
+            font=ctk.CTkFont(size=14, weight="bold"), text_color=C["text"],
+        )
+        self.topbar_title.pack(side="left", padx=24)
+
+        self.topbar_status = ctk.CTkLabel(
+            self.topbar, text="Ready",
+            font=ctk.CTkFont(size=12), text_color=C["text3"],
+        )
+        self.topbar_status.pack(side="right", padx=24)
+
+        # Content area
+        self.content_frame = ctk.CTkFrame(main_wrapper, fg_color=C["bg"], corner_radius=0)
+        self.content_frame.pack(fill="both", expand=True)
+
+        self._show_import_panel()
+
+    # --- Sidebar step ---
+
+    def _create_sidebar_step(self, step: dict):
+        row = ctk.CTkFrame(self.sidebar, fg_color="transparent", height=38)
+        row.pack(fill="x", padx=10, pady=1)
+        row.pack_propagate(False)
+
+        btn = ctk.CTkButton(
+            row,
+            text=f"  {step['icon']}   {step['label']}",
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+            height=36,
+            corner_radius=8,
+            fg_color="transparent",
+            text_color=C["text2"],
+            hover_color=C["surface3"],
+            command=lambda m=step["method"]: getattr(self, m)(),
+        )
+        btn.pack(fill="both", expand=True, side="left")
+
+        badge = ctk.CTkLabel(
+            row, text="", width=20,
+            font=ctk.CTkFont(size=10), text_color=C["green"],
+        )
+        badge.pack(side="right", padx=(0, 8))
+
+        self._sidebar_buttons[step["id"]] = btn
+        self._sidebar_badges[step["id"]] = badge
+
+    def _set_active_step(self, step_id: str, title: str):
+        self.active_step = step_id
+        self.topbar_title.configure(text=title)
+        for sid, btn in self._sidebar_buttons.items():
+            if sid == step_id:
+                btn.configure(fg_color=C["accent_dim"], text_color=C["text"])
+            else:
+                btn.configure(fg_color="transparent", text_color=C["text2"])
+
+    def _mark_step_done(self, step_id: str):
+        self.completed_steps.add(step_id)
+        self._sidebar_badges[step_id].configure(text="done", text_color=C["green"])
+
+    # ══════════════════════════════════════════
+    #  Helper: build cards & widgets
+    # ══════════════════════════════════════════
+
     def _clear_content(self):
-        """Очистка основной области"""
-        for widget in self.content_frame.winfo_children():
-            widget.destroy()
-    
-    def _show_welcome_screen(self):
-        """Показ приветственного экрана"""
-        self._clear_content()
-        
-        welcome_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        welcome_frame.pack(expand=True)
-        
-        # Приветственный текст
-        welcome_text = ctk.CTkLabel(
-            welcome_frame,
-            text="Welcome to Video Studio!",
-            font=ctk.CTkFont(size=32, weight="bold"),
+        for w in self.content_frame.winfo_children():
+            w.destroy()
+
+    def _make_card(self, parent, **kwargs) -> ctk.CTkFrame:
+        card = ctk.CTkFrame(
+            parent,
+            fg_color=C["surface"],
+            corner_radius=12,
+            border_width=1,
+            border_color=C["border"],
+            **kwargs,
         )
-        welcome_text.pack(pady=(0, 10))
-        
-        subtitle = ctk.CTkLabel(
-            welcome_frame,
-            text="Professional YouTube video editing & publishing",
-            font=ctk.CTkFont(size=16),
-            text_color="gray60",
+        return card
+
+    def _make_action_btn(self, parent, text, command, accent=True, **kw) -> ctk.CTkButton:
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=42,
+            corner_radius=10,
+            fg_color=C["accent"] if accent else C["surface3"],
+            hover_color=C["accent_hover"] if accent else C["border"],
+            text_color=C["text"],
+            command=command,
+            **kw,
         )
-        subtitle.pack(pady=(0, 40))
-        
-        # Кнопка начала работы
-        start_button = ctk.CTkButton(
-            welcome_frame,
-            text="📁 Import Video to Start",
-            font=ctk.CTkFont(size=18, weight="bold"),
-            height=50,
-            width=300,
-            command=self._show_import_panel,
-        )
-        start_button.pack()
-    
+
+    def _make_section_title(self, parent, text):
+        ctk.CTkLabel(
+            parent, text=text,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=C["text"],
+        ).pack(anchor="w", padx=24, pady=(20, 8))
+
+    def _update_status(self, message: str):
+        self.topbar_status.configure(text=message, text_color=C["text3"])
+
+    def _set_status_working(self, message: str):
+        self.topbar_status.configure(text=message, text_color=C["orange"])
+
+    def _set_status_done(self, message: str):
+        self.topbar_status.configure(text=message, text_color=C["green"])
+
+    def _set_status_error(self, message: str):
+        self.topbar_status.configure(text=message, text_color=C["red"])
+
+    # ══════════════════════════════════════════
+    #  Panels
+    # ══════════════════════════════════════════
+
+    # ---------- 01 Import ----------
+
     def _show_import_panel(self):
-        """Панель импорта видео"""
         self._clear_content()
-        self._update_status("Import Video")
-        
-        panel = ctk.CTkFrame(self.content_frame)
-        panel.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        # Заголовок
-        title = ctk.CTkLabel(
-            panel,
-            text="📁 Import Video",
-            font=ctk.CTkFont(size=24, weight="bold"),
-        )
-        title.pack(pady=(20, 10))
-        
-        # Информация о текущем видео
+        self._set_active_step("import", "Import Video")
+        self._update_status("Select a video file to start")
+
+        wrapper = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        wrapper.pack(expand=True)
+
+        # Drop zone card
+        card = self._make_card(wrapper, width=520, height=320)
+        card.pack(pady=(0, 24))
+        card.pack_propagate(False)
+
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.place(relx=0.5, rely=0.5, anchor="center")
+
+        # If video loaded — show its name
         if self.project["video_path"]:
-            info = ctk.CTkLabel(
-                panel,
-                text=f"Current: {Path(self.project['video_path']).name}",
-                font=ctk.CTkFont(size=14),
-                text_color="green",
-            )
-            info.pack(pady=10)
-        
-        # Кнопка выбора файла
-        select_btn = ctk.CTkButton(
-            panel,
-            text="Select Video File",
-            font=ctk.CTkFont(size=16),
-            height=50,
-            width=300,
-            command=self._import_video,
-        )
-        select_btn.pack(pady=20)
-        
-        # Поддерживаемые форматы
-        formats = ctk.CTkLabel(
-            panel,
-            text="Supported: MP4, MOV, AVI, MKV",
-            font=ctk.CTkFont(size=12),
-            text_color="gray60",
-        )
-        formats.pack()
-    
+            name = Path(self.project["video_path"]).name
+            ctk.CTkLabel(
+                inner, text="Video loaded",
+                font=ctk.CTkFont(size=28, weight="bold"), text_color=C["green"],
+            ).pack(pady=(0, 8))
+            ctk.CTkLabel(
+                inner, text=name,
+                font=ctk.CTkFont(size=14), text_color=C["text2"],
+                wraplength=440,
+            ).pack(pady=(0, 20))
+            self._make_action_btn(inner, "Choose another file", self._import_video, accent=False).pack()
+        else:
+            ctk.CTkLabel(
+                inner, text="Drop or select video",
+                font=ctk.CTkFont(size=22, weight="bold"), text_color=C["text"],
+            ).pack(pady=(0, 8))
+            ctk.CTkLabel(
+                inner, text="MP4, MOV, AVI, MKV",
+                font=ctk.CTkFont(size=12), text_color=C["text3"],
+            ).pack(pady=(0, 28))
+            self._make_action_btn(inner, "Select Video File", self._import_video, width=220).pack()
+
+    # ---------- 02 Edit ----------
+
     def _show_edit_panel(self):
-        """Панель редактирования"""
-        if not self.project["video_path"]:
-            messagebox.showwarning("No Video", "Please import a video first!")
+        if not self._require_video():
             return
-        
         self._clear_content()
-        self._update_status("Edit & Trim")
-        
-        panel = ctk.CTkFrame(self.content_frame)
-        panel.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        title = ctk.CTkLabel(
-            panel,
-            text="✂️ Edit & Trim Video",
-            font=ctk.CTkFont(size=24, weight="bold"),
+        self._set_active_step("edit", "Edit & Trim")
+        self._update_status("Trim your video on the timeline")
+
+        try:
+            from .timeline_panel import TimelinePanel
+        except ImportError:
+            from ui.timeline_panel import TimelinePanel
+
+        timeline = TimelinePanel(
+            self.content_frame,
+            on_video_edited=self._on_video_edited,
         )
-        title.pack(pady=20)
-        
-        # TODO: Добавить timeline и preview
-        placeholder = ctk.CTkLabel(
-            panel,
-            text="Video editing interface\n(Timeline, trim tools, preview)",
-            font=ctk.CTkFont(size=14),
-            text_color="gray60",
-        )
-        placeholder.pack(expand=True)
-    
+        timeline.pack(fill="both", expand=True, padx=24, pady=24)
+        timeline.load_video(Path(self.project["video_path"]))
+
+    def _on_video_edited(self, output_path: str):
+        self.project["video_path"] = output_path
+        self._mark_step_done("edit")
+        self._set_status_done(f"Trimmed: {Path(output_path).name}")
+
+    # ---------- 03 Transcribe ----------
+
     def _show_transcribe_panel(self):
-        """Панель транскрибации"""
-        if not self.project["video_path"]:
-            messagebox.showwarning("No Video", "Please import a video first!")
+        if not self._require_video():
             return
-        
         self._clear_content()
-        self._update_status("Transcribe Audio")
-        
-        panel = ctk.CTkFrame(self.content_frame)
-        panel.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        title = ctk.CTkLabel(
-            panel,
-            text="🎤 Transcribe Audio",
-            font=ctk.CTkFont(size=24, weight="bold"),
+        self._set_active_step("transcribe", "Transcribe Audio")
+        self._update_status("Ready to transcribe")
+
+        scroller = ctk.CTkScrollableFrame(self.content_frame, fg_color="transparent")
+        scroller.pack(fill="both", expand=True, padx=24, pady=24)
+
+        # Action card
+        card = self._make_card(scroller)
+        card.pack(fill="x", pady=(0, 16))
+
+        card_inner = ctk.CTkFrame(card, fg_color="transparent")
+        card_inner.pack(fill="x", padx=24, pady=20)
+
+        ctk.CTkLabel(
+            card_inner, text="Whisper Transcription",
+            font=ctk.CTkFont(size=16, weight="bold"), text_color=C["text"],
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            card_inner, text="Transcribe audio using OpenAI Whisper model locally",
+            font=ctk.CTkFont(size=12), text_color=C["text3"],
+        ).pack(anchor="w", pady=(4, 16))
+
+        self._transcribe_progress = ctk.CTkProgressBar(
+            card_inner, height=6, corner_radius=3,
+            fg_color=C["surface3"], progress_color=C["accent"],
         )
-        title.pack(pady=20)
-        
-        # Кнопка запуска транскрибации
-        transcribe_btn = ctk.CTkButton(
-            panel,
-            text="Start Transcription (Whisper)",
-            font=ctk.CTkFont(size=16),
-            height=50,
-            width=300,
-            command=self._run_transcription,
-        )
-        transcribe_btn.pack(pady=20)
-        
-        # Результат транскрибации
+        self._transcribe_progress.pack(fill="x", pady=(0, 12))
+        self._transcribe_progress.set(0)
+
+        self._transcribe_btn = self._make_action_btn(card_inner, "Start Transcription", self._run_transcription, width=200)
+        self._transcribe_btn.pack(anchor="w")
+
+        # Result card
         if self.project["transcription"]:
-            result_frame = ctk.CTkFrame(panel)
-            result_frame.pack(fill="both", expand=True, padx=20, pady=20)
-            
-            result_text = ctk.CTkTextbox(result_frame, font=ctk.CTkFont(size=12))
-            result_text.pack(fill="both", expand=True)
-            result_text.insert("1.0", self.project["transcription"])
-            result_text.configure(state="disabled")
-    
+            res_card = self._make_card(scroller)
+            res_card.pack(fill="both", expand=True)
+
+            self._make_section_title(res_card, "Transcription Result")
+
+            txt = ctk.CTkTextbox(
+                res_card, font=ctk.CTkFont(size=13),
+                fg_color=C["surface2"], corner_radius=8,
+                text_color=C["text"], wrap="word",
+            )
+            txt.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+            txt.insert("1.0", self.project["transcription"])
+            txt.configure(state="disabled")
+
+    # ---------- 04 Clean Audio ----------
+
     def _show_audio_cleanup_panel(self):
-        """Панель очистки аудио"""
-        if not self.project["video_path"]:
-            messagebox.showwarning("No Video", "Please import a video first!")
+        if not self._require_video():
             return
-        
         self._clear_content()
-        self._update_status("Clean Audio")
-        
-        panel = ctk.CTkFrame(self.content_frame)
-        panel.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        title = ctk.CTkLabel(
-            panel,
-            text="🧹 Clean Audio",
-            font=ctk.CTkFont(size=24, weight="bold"),
-        )
-        title.pack(pady=20)
-        
-        # Кнопка очистки
-        cleanup_btn = ctk.CTkButton(
-            panel,
-            text="Clean Audio (AI)",
-            font=ctk.CTkFont(size=16),
-            height=50,
-            width=300,
-            command=self._run_audio_cleanup,
-        )
-        cleanup_btn.pack(pady=20)
-    
+        self._set_active_step("audio", "Clean Audio")
+        self._update_status("Ready")
+
+        wrapper = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        wrapper.pack(expand=True)
+
+        card = self._make_card(wrapper, width=480, height=220)
+        card.pack()
+        card.pack_propagate(False)
+
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.place(relx=0.5, rely=0.5, anchor="center")
+
+        ctk.CTkLabel(
+            inner, text="AI Audio Cleanup",
+            font=ctk.CTkFont(size=18, weight="bold"), text_color=C["text"],
+        ).pack(pady=(0, 4))
+        ctk.CTkLabel(
+            inner, text="Remove noise and enhance audio quality",
+            font=ctk.CTkFont(size=12), text_color=C["text3"],
+        ).pack(pady=(0, 20))
+
+        self._audio_btn = self._make_action_btn(inner, "Clean Audio", self._run_audio_cleanup, width=200)
+        self._audio_btn.pack()
+
+    # ---------- 05 Titles ----------
+
     def _show_titles_panel(self):
-        """Панель генерации заголовков"""
         if not self.project["transcription"]:
             messagebox.showwarning("No Transcription", "Please transcribe video first!")
             return
-        
         self._clear_content()
-        self._update_status("Generate Titles")
-        
-        panel = ctk.CTkFrame(self.content_frame)
-        panel.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        title = ctk.CTkLabel(
-            panel,
-            text="📝 Generate Titles",
-            font=ctk.CTkFont(size=24, weight="bold"),
-        )
-        title.pack(pady=20)
-        
-        # Кнопка генерации
-        generate_btn = ctk.CTkButton(
-            panel,
-            text="Generate Titles (AI)",
-            font=ctk.CTkFont(size=16),
-            height=50,
-            width=300,
-            command=self._run_title_generation,
-        )
-        generate_btn.pack(pady=20)
-        
-        # Список сгенерированных заголовков
+        self._set_active_step("titles", "Generate Titles")
+        self._update_status("Ready")
+
+        scroller = ctk.CTkScrollableFrame(self.content_frame, fg_color="transparent")
+        scroller.pack(fill="both", expand=True, padx=24, pady=24)
+
+        # Action card
+        card = self._make_card(scroller)
+        card.pack(fill="x", pady=(0, 16))
+
+        card_inner = ctk.CTkFrame(card, fg_color="transparent")
+        card_inner.pack(fill="x", padx=24, pady=20)
+
+        ctk.CTkLabel(
+            card_inner, text="AI Title Generator",
+            font=ctk.CTkFont(size=16, weight="bold"), text_color=C["text"],
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            card_inner, text="Generate engaging titles based on transcription",
+            font=ctk.CTkFont(size=12), text_color=C["text3"],
+        ).pack(anchor="w", pady=(4, 16))
+
+        self._titles_btn = self._make_action_btn(card_inner, "Generate Titles", self._run_title_generation, width=200)
+        self._titles_btn.pack(anchor="w")
+
+        # Generated titles
         if self.project["titles"]:
-            titles_frame = ctk.CTkFrame(panel)
-            titles_frame.pack(fill="both", expand=True, padx=20, pady=20)
-            
+            self._make_section_title(scroller, "Choose a title")
             for i, title_text in enumerate(self.project["titles"], 1):
-                title_btn = ctk.CTkButton(
-                    titles_frame,
-                    text=f"{i}. {title_text}",
-                    anchor="w",
+                row = self._make_card(scroller)
+                row.pack(fill="x", pady=3)
+
+                btn = ctk.CTkButton(
+                    row,
+                    text=f"  {i}.  {title_text}",
+                    font=ctk.CTkFont(size=13),
+                    anchor="w", height=44, corner_radius=10,
+                    fg_color="transparent",
+                    hover_color=C["accent_dim"],
+                    text_color=C["text"],
                     command=lambda t=title_text: self._select_title(t),
                 )
-                title_btn.pack(fill="x", pady=5, padx=10)
-    
+                btn.pack(fill="x")
+
+                if self.project["selected_title"] == title_text:
+                    btn.configure(fg_color=C["accent_dim"])
+
+    # ---------- 06 Thumbnail ----------
+
     def _show_thumbnail_panel(self):
-        """Панель создания обложки"""
         if not self.project["selected_title"]:
             messagebox.showwarning("No Title", "Please generate and select a title first!")
             return
-        
         self._clear_content()
-        self._update_status("Create Thumbnail")
-        
-        panel = ctk.CTkFrame(self.content_frame)
-        panel.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        title = ctk.CTkLabel(
-            panel,
-            text="🎨 Create Thumbnail",
-            font=ctk.CTkFont(size=24, weight="bold"),
-        )
-        title.pack(pady=20)
-        
-        # Кнопка генерации
-        generate_btn = ctk.CTkButton(
-            panel,
-            text="Generate Thumbnail (Gemini)",
-            font=ctk.CTkFont(size=16),
-            height=50,
-            width=300,
-            command=self._run_thumbnail_generation,
-        )
-        generate_btn.pack(pady=20)
-    
+        self._set_active_step("thumbnail", "Create Thumbnail")
+        self._update_status("Ready")
+
+        wrapper = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        wrapper.pack(expand=True)
+
+        card = self._make_card(wrapper, width=480, height=240)
+        card.pack()
+        card.pack_propagate(False)
+
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.place(relx=0.5, rely=0.5, anchor="center")
+
+        ctk.CTkLabel(
+            inner, text="Thumbnail Generator",
+            font=ctk.CTkFont(size=18, weight="bold"), text_color=C["text"],
+        ).pack(pady=(0, 4))
+
+        ctk.CTkLabel(
+            inner, text=f'Title: "{self.project["selected_title"][:60]}..."',
+            font=ctk.CTkFont(size=12), text_color=C["text3"],
+            wraplength=400,
+        ).pack(pady=(0, 20))
+
+        self._thumb_btn = self._make_action_btn(inner, "Generate with Gemini", self._run_thumbnail_generation, width=220)
+        self._thumb_btn.pack()
+
+    # ---------- 07 Preview ----------
+
     def _show_preview_panel(self):
-        """Панель предпросмотра"""
         self._clear_content()
-        self._update_status("Preview")
-        
-        panel = ctk.CTkFrame(self.content_frame)
-        panel.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        title = ctk.CTkLabel(
-            panel,
-            text="▶️ Preview",
-            font=ctk.CTkFont(size=24, weight="bold"),
-        )
-        title.pack(pady=20)
-        
-        # TODO: Добавить video player
-        placeholder = ctk.CTkLabel(
-            panel,
-            text="Video preview player\n(Coming soon)",
-            font=ctk.CTkFont(size=14),
-            text_color="gray60",
-        )
-        placeholder.pack(expand=True)
-    
-    def _show_upload_panel(self):
-        """Панель загрузки на YouTube"""
+        self._set_active_step("preview", "Preview")
+        self._update_status("Preview your work")
+
         if not self.project["video_path"]:
-            messagebox.showwarning("No Video", "Please complete all steps first!")
+            wrapper = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+            wrapper.pack(expand=True)
+            ctk.CTkLabel(
+                wrapper, text="No video loaded yet",
+                font=ctk.CTkFont(size=16), text_color=C["text3"],
+            ).pack()
             return
-        
+
+        try:
+            from .preview_panel import PreviewPanel
+        except ImportError:
+            from ui.preview_panel import PreviewPanel
+
+        preview = PreviewPanel(self.content_frame, on_preview_error=lambda e: self._set_status_error(e))
+        preview.pack(fill="both", expand=True, padx=24, pady=24)
+        preview.load_video(Path(self.project["video_path"]))
+
+    # ---------- 08 Upload ----------
+
+    def _show_upload_panel(self):
+        if not self._require_video():
+            return
         self._clear_content()
-        self._update_status("Upload to YouTube")
-        
-        panel = ctk.CTkFrame(self.content_frame)
-        panel.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        title = ctk.CTkLabel(
-            panel,
-            text="📤 Upload to YouTube",
-            font=ctk.CTkFont(size=24, weight="bold"),
-        )
-        title.pack(pady=20)
-        
-        # Кнопка загрузки
-        upload_btn = ctk.CTkButton(
-            panel,
-            text="Upload Video",
-            font=ctk.CTkFont(size=16),
-            height=50,
-            width=300,
-            command=self._run_youtube_upload,
-        )
-        upload_btn.pack(pady=20)
-    
-    # ========== ДЕЙСТВИЯ ==========
-    
+        self._set_active_step("upload", "Upload to YouTube")
+        self._update_status("Configure and upload")
+
+        try:
+            from .youtube_panel import YouTubePanel
+        except ImportError:
+            from ui.youtube_panel import YouTubePanel
+
+        scroller = ctk.CTkScrollableFrame(self.content_frame, fg_color="transparent")
+        scroller.pack(fill="both", expand=True, padx=24, pady=24)
+
+        panel = YouTubePanel(scroller, artifacts_manager=self.artifacts)
+        panel.pack(fill="both", expand=True)
+
+        # Pre-fill title if available
+        if self.project["selected_title"]:
+            panel.title_entry.insert(0, self.project["selected_title"])
+        if self.project["transcription"]:
+            panel.desc_textbox.insert("1.0", self.project["transcription"][:500])
+
+    # ══════════════════════════════════════════
+    #  Actions
+    # ══════════════════════════════════════════
+
+    def _require_video(self) -> bool:
+        if not self.project["video_path"]:
+            messagebox.showwarning("No Video", "Please import a video first!")
+            return False
+        return True
+
     def _import_video(self):
-        """Импорт видеофайла"""
-        filetypes = [
-            ("Video files", "*.mp4 *.mov *.avi *.mkv"),
-            ("All files", "*.*")
-        ]
-        
-        filepath = filedialog.askopenfilename(
-            title="Select Video File",
-            filetypes=filetypes
-        )
-        
+        filetypes = [("Video files", "*.mp4 *.mov *.avi *.mkv"), ("All files", "*.*")]
+        filepath = filedialog.askopenfilename(title="Select Video File", filetypes=filetypes)
         if filepath:
             self.project["video_path"] = filepath
-            
-            # Обновляем имя проекта в artifacts manager на основе имени видео
-            video_name = Path(filepath).stem  # Имя файла без расширения
+            video_name = Path(filepath).stem
             self.artifacts = ArtifactsManager(project_name=video_name)
             self.video_processor.artifacts = self.artifacts
-            
-            self._update_status(f"Loaded: {Path(filepath).name}")
-            messagebox.showinfo("Success", f"Video loaded:\n{Path(filepath).name}")
-            self._show_import_panel()  # Refresh panel
-    
+            self._mark_step_done("import")
+            self._set_status_done(f"Loaded: {Path(filepath).name}")
+            self._show_import_panel()
+
     def _run_transcription(self):
-        """Запуск транскрибации"""
-        self._update_status("Transcribing... (this may take a while)")
-        
+        self._set_status_working("Transcribing...")
+        self._transcribe_btn.configure(state="disabled", text="Transcribing...")
+        self._transcribe_progress.set(0)
+
         def transcribe():
             try:
+                def progress_cb(progress, status):
+                    self.after(0, lambda p=progress: self._transcribe_progress.set(p / 100))
+                    self.after(0, lambda s=status: self._set_status_working(s))
+
+                self.whisper.progress_callback = progress_cb
                 result = self.whisper.transcribe(self.project["video_path"])
                 self.project["transcription"] = result["text"]
-                self.after(0, lambda: self._update_status("Transcription complete!"))
-                self.after(0, self._show_transcribe_panel)  # Refresh
+                self.after(0, lambda: self._transcribe_progress.set(1.0))
+                self.after(0, lambda: self._mark_step_done("transcribe"))
+                self.after(0, lambda: self._set_status_done("Transcription complete!"))
+                self.after(0, self._show_transcribe_panel)
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", f"Transcription failed:\n{e}"))
-        
+                error_msg = str(e)
+                self.after(0, lambda: self._set_status_error("Transcription failed"))
+                self.after(0, lambda: messagebox.showerror("Error", f"Transcription failed:\n{error_msg}"))
+                self.after(0, lambda: self._transcribe_btn.configure(state="normal", text="Start Transcription"))
+
         threading.Thread(target=transcribe, daemon=True).start()
-    
+
     def _run_audio_cleanup(self):
-        """Запуск очистки аудио"""
-        self._update_status("Cleaning audio...")
-        
+        self._set_status_working("Cleaning audio...")
+        self._audio_btn.configure(state="disabled", text="Processing...")
+
         def cleanup():
             try:
                 output_path = Path(self.project["video_path"]).parent / "audio_cleaned.wav"
-                self.audio_cleanup.cleanup(
-                    self.project["video_path"],
-                    str(output_path),
-                    preset="medium"
-                )
+                self.audio_cleanup.cleanup(self.project["video_path"], str(output_path), preset="medium")
                 self.project["audio_path"] = str(output_path)
-                self.after(0, lambda: self._update_status("Audio cleaned!"))
-                self.after(0, lambda: messagebox.showinfo("Success", "Audio cleanup complete!"))
+                self.after(0, lambda: self._mark_step_done("audio"))
+                self.after(0, lambda: self._set_status_done("Audio cleaned!"))
+                self.after(0, lambda: self._audio_btn.configure(state="normal", text="Clean Audio"))
+                self.after(0, lambda: messagebox.showinfo("Done", "Audio cleanup complete!"))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", f"Cleanup failed:\n{e}"))
-        
+                error_msg = str(e)
+                self.after(0, lambda: self._set_status_error("Cleanup failed"))
+                self.after(0, lambda: messagebox.showerror("Error", f"Cleanup failed:\n{error_msg}"))
+                self.after(0, lambda: self._audio_btn.configure(state="normal", text="Clean Audio"))
+
         threading.Thread(target=cleanup, daemon=True).start()
-    
+
     def _run_title_generation(self):
-        """Запуск генерации заголовков"""
-        self._update_status("Generating titles...")
-        
+        self._set_status_working("Generating titles...")
+        self._titles_btn.configure(state="disabled", text="Generating...")
+
         def generate():
             try:
                 titles = self.title_generator.generate(
-                    description=self.project["transcription"][:500],  # First 500 chars
-                    count=8,
-                    style="engaging"
+                    description=self.project["transcription"][:500],
+                    count=8, style="engaging",
                 )
                 self.project["titles"] = titles
-                self.after(0, lambda: self._update_status("Titles generated!"))
-                self.after(0, self._show_titles_panel)  # Refresh
+                self.after(0, lambda: self._mark_step_done("titles"))
+                self.after(0, lambda: self._set_status_done("Titles generated!"))
+                self.after(0, self._show_titles_panel)
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", f"Title generation failed:\n{e}"))
-        
+                error_msg = str(e)
+                self.after(0, lambda: self._set_status_error("Title generation failed"))
+                self.after(0, lambda: messagebox.showerror("Error", f"Title generation failed:\n{error_msg}"))
+                self.after(0, lambda: self._titles_btn.configure(state="normal", text="Generate Titles"))
+
         threading.Thread(target=generate, daemon=True).start()
-    
+
     def _select_title(self, title: str):
-        """Выбор заголовка"""
         self.project["selected_title"] = title
-        self._update_status(f"Selected: {title}")
-        messagebox.showinfo("Title Selected", f"Selected:\n{title}")
-    
+        self._set_status_done(f"Selected: {title[:50]}...")
+        self._show_titles_panel()
+
     def _run_thumbnail_generation(self):
-        """Запуск генерации обложки"""
-        self._update_status("Generating thumbnail...")
-        
+        self._set_status_working("Generating thumbnail...")
+        self._thumb_btn.configure(state="disabled", text="Generating...")
+
         def generate():
             try:
                 output_path = Path(self.project["video_path"]).parent / "thumbnail.jpg"
                 self.cover_generator.generate(
                     title=self.project["selected_title"],
-                    output_path=str(output_path),
-                    style="modern"
+                    output_path=str(output_path), style="modern",
                 )
                 self.project["thumbnail_path"] = str(output_path)
-                self.after(0, lambda: self._update_status("Thumbnail generated!"))
-                self.after(0, lambda: messagebox.showinfo("Success", f"Thumbnail saved:\n{output_path}"))
+                self.after(0, lambda: self._mark_step_done("thumbnail"))
+                self.after(0, lambda: self._set_status_done("Thumbnail generated!"))
+                self.after(0, lambda: self._thumb_btn.configure(state="normal", text="Generate with Gemini"))
+                self.after(0, lambda: messagebox.showinfo("Done", f"Thumbnail saved:\n{output_path}"))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", f"Thumbnail generation failed:\n{e}"))
-        
+                error_msg = str(e)
+                self.after(0, lambda: self._set_status_error("Thumbnail generation failed"))
+                self.after(0, lambda: messagebox.showerror("Error", f"Thumbnail generation failed:\n{error_msg}"))
+                self.after(0, lambda: self._thumb_btn.configure(state="normal", text="Generate with Gemini"))
+
         threading.Thread(target=generate, daemon=True).start()
-    
-    def _run_youtube_upload(self):
-        """Запуск загрузки на YouTube"""
-        messagebox.showinfo("Coming Soon", "YouTube upload requires OAuth setup.\nSee docs/youtube-integration.md")
-    
+
+    # ══════════════════════════════════════════
+    #  Settings / Help
+    # ══════════════════════════════════════════
+
     def _open_settings(self):
-        """Открыть настройки"""
-        messagebox.showinfo("Settings", "Settings panel coming soon!\nFor now, edit .env file manually.")
-        
+        win = ctk.CTkToplevel(self)
+        win.title("Settings")
+        win.geometry("600x500")
+        win.transient(self)
+        win.grab_set()
+
+        try:
+            from .settings_panel import SettingsPanel
+        except ImportError:
+            from ui.settings_panel import SettingsPanel
+
+        panel = SettingsPanel(win)
+        panel.pack(fill="both", expand=True, padx=16, pady=16)
+
     def _open_help(self):
-        """Открыть справку"""
-        messagebox.showinfo("Help", "Video Studio Help\n\nWorkflow:\n1. Import video\n2. Transcribe\n3. Clean audio\n4. Generate titles\n5. Create thumbnail\n6. Upload to YouTube\n\nSee README.md for details.")
-        
-    def _update_status(self, message: str):
-        """Обновить текст статус-бара"""
-        self.status_label.configure(text=message)
-        print(f"📊 {message}")
+        win = ctk.CTkToplevel(self)
+        win.title("Help")
+        win.geometry("480x380")
+        win.transient(self)
+
+        txt = ctk.CTkTextbox(win, font=ctk.CTkFont(size=13), wrap="word")
+        txt.pack(fill="both", expand=True, padx=16, pady=16)
+        txt.insert("1.0", (
+            "Video Studio — Workflow\n\n"
+            "01  Import video file\n"
+            "02  Edit & trim on the timeline\n"
+            "03  Transcribe audio with Whisper\n"
+            "04  Clean audio (noise reduction)\n"
+            "05  Generate engaging titles with AI\n"
+            "06  Create thumbnail with Gemini\n"
+            "07  Preview the result\n"
+            "08  Upload to YouTube\n\n"
+            "See README.md for details."
+        ))
+        txt.configure(state="disabled")

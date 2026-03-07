@@ -6,6 +6,7 @@ Supports automatic model download and progress tracking.
 """
 
 import os
+import ssl
 import subprocess
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any
@@ -63,6 +64,19 @@ class WhisperTranscriber:
         """Update progress via callback."""
         if self.progress_callback:
             self.progress_callback(progress, status)
+
+    @staticmethod
+    def _patch_ssl():
+        """Patch SSL context to handle self-signed certificate errors on macOS."""
+        import urllib.request
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        urllib.request.install_opener(
+            urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=ctx)
+            )
+        )
     
     def is_model_available(self) -> bool:
         """Check if model is already downloaded."""
@@ -96,10 +110,13 @@ class WhisperTranscriber:
         
         try:
             import whisper
-            
+
+            # Fix SSL certificate errors on macOS
+            self._patch_ssl()
+
             model_info = self.MODELS[self.model_name]
             self._update_progress(0, f"Downloading {self.model_name} model ({model_info['size_mb']} MB)...")
-            
+
             # Load model (will download if needed)
             self._model = whisper.load_model(
                 self.model_name,
