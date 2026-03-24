@@ -3,6 +3,7 @@ Workflow Panel — панель управления этапами обрабо
 """
 
 import customtkinter as ctk
+import threading
 from typing import Dict, Callable, Optional
 from ..core.artifacts import WorkflowState
 
@@ -199,26 +200,64 @@ class WorkflowPanel(ctk.CTkFrame):
     def _run_single_step(self, step: str):
         """Запуск одного этапа"""
         if self.on_run_step:
+            self.status_labels[step].configure(text="⏳ Running...", text_color="orange")
+            self.run_buttons[step].configure(state="disabled")
             self.on_run_step(step)
         else:
             print(f"Running step: {step}")
-            
+
     def _run_selected_steps(self):
-        """Запуск всех выбранных этапов"""
+        """Запуск всех выбранных этапов последовательно в фоне."""
         selected_steps = [
-            step for step, checkbox in self.checkboxes.items()
-            if checkbox.get()
+            step for step in WorkflowState.WORKFLOW_STEPS
+            if step in self.checkboxes and self.checkboxes[step].get()
         ]
-        
+
         if not selected_steps:
-            print("No steps selected")
+            self.progress_label.configure(text="No steps selected")
             return
-            
-        print(f"Running {len(selected_steps)} steps: {selected_steps}")
-        
-        # TODO: Реализовать последовательный запуск этапов
-        for step in selected_steps:
-            self._run_single_step(step)
+
+        # Skip already completed steps
+        steps_to_run = [
+            s for s in selected_steps
+            if not (self.workflow_state and self.workflow_state.is_step_completed(s))
+        ]
+
+        if not steps_to_run:
+            self.progress_label.configure(text="All selected steps already completed")
+            return
+
+        self.run_workflow_btn.configure(state="disabled", text="Running...")
+        self.progress_label.configure(text=f"Running {len(steps_to_run)} steps sequentially...")
+
+        def run_chain():
+            for i, step in enumerate(steps_to_run):
+                self.after(0, lambda s=step: self.status_labels[s].configure(
+                    text="⏳ Running...", text_color="orange"
+                ))
+                self.after(0, lambda cur=i, total=len(steps_to_run): self.progress_label.configure(
+                    text=f"Step {cur + 1}/{total}: {self.STEP_LABELS.get(steps_to_run[cur], steps_to_run[cur])}"
+                ))
+
+                if self.on_run_step:
+                    try:
+                        self.on_run_step(step)
+                        if self.workflow_state:
+                            self.workflow_state.mark_completed(step)
+                        self.after(0, lambda s=step: self._update_step_status(s))
+                    except Exception as e:
+                        if self.workflow_state:
+                            self.workflow_state.mark_error(step, str(e))
+                        self.after(0, lambda s=step: self._update_step_status(s))
+                        self.after(0, lambda s=step, err=str(e): self.progress_label.configure(
+                            text=f"Error at {self.STEP_LABELS.get(s, s)}: {err}"
+                        ))
+                        break
+
+            self.after(0, lambda: self.run_workflow_btn.configure(state="normal", text="▶️ Run Selected Steps"))
+            self.after(0, self._update_progress)
+
+        threading.Thread(target=run_chain, daemon=True).start()
             
     def _select_all_steps(self):
         """Выбрать все этапы"""

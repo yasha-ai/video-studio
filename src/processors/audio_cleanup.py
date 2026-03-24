@@ -186,9 +186,11 @@ class AudioCleanup:
             filters.append(f"lowpass=f={params['lowpass']}")
         
         # Noise reduction (afftdn)
+        # nr_amount (1-10) maps to nf (noise floor in dB): 1→-70, 10→-20
         if params.get('nr_amount'):
             nr = params['nr_amount']
-            filters.append(f"afftdn=nf={nr}")
+            nf_db = -70 + (nr - 1) * (50 / 9)  # 1→-70, 5→-47.8, 10→-20
+            filters.append(f"afftdn=nf={nf_db:.0f}")
         
         # Gate (silence removal)
         if params.get('gate'):

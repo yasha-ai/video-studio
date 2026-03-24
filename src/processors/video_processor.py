@@ -11,12 +11,18 @@ Video Processor — обработка видео через ffmpeg.
 """
 
 import os
+import re
 import subprocess
 from pathlib import Path
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Callable
 from dataclasses import dataclass
 
 from src.core.artifacts import ArtifactsManager
+
+try:
+    from config.settings import Settings
+except ImportError:
+    Settings = None
 
 
 @dataclass
@@ -39,23 +45,76 @@ class VideoProcessor:
             artifacts: Менеджер артефактов проекта
         """
         self.artifacts = artifacts
+        self.ffmpeg = Settings.get_ffmpeg() if Settings else "ffmpeg"
+        self.ffprobe = Settings.get_ffprobe() if Settings else "ffprobe"
         self._check_ffmpeg()
-    
+
     def _check_ffmpeg(self):
         """Проверка наличия ffmpeg."""
         try:
             result = subprocess.run(
-                ["ffmpeg", "-version"],
+                [self.ffmpeg, "-version"],
                 capture_output=True,
                 text=True
             )
             if result.returncode != 0:
-                raise RuntimeError("ffmpeg не установлен или не доступен")
+                raise RuntimeError("FFmpeg not installed or not accessible")
         except FileNotFoundError:
             raise RuntimeError(
-                "ffmpeg не найден. Установите его: sudo apt install ffmpeg"
+                "FFmpeg not found. Install it (brew install ffmpeg / apt install ffmpeg) "
+                "or set FFMPEG_PATH in Settings."
             )
     
+    def _run_ffmpeg(
+        self,
+        cmd: List[str],
+        total_duration: float = 0,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+    ) -> str:
+        """Run ffmpeg command with optional progress parsing.
+
+        Args:
+            cmd: ffmpeg command as list
+            total_duration: Expected output duration (seconds) for progress calc
+            progress_callback: callback(progress_0_to_100, status_message)
+
+        Returns:
+            stderr output
+
+        Raises:
+            RuntimeError: if ffmpeg exits with error
+        """
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        if progress_callback and total_duration > 0:
+            # Read stderr line-by-line to parse progress
+            stderr_lines = []
+            time_re = re.compile(r"time=(\d+):(\d+):(\d+)\.(\d+)")
+            for line in process.stderr:
+                stderr_lines.append(line)
+                m = time_re.search(line)
+                if m:
+                    h, mn, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+                    current = h * 3600 + mn * 60 + s + ms / 100
+                    pct = min(100.0, (current / total_duration) * 100)
+                    progress_callback(pct, f"Processing... {pct:.0f}%")
+            process.wait()
+            stderr = "".join(stderr_lines)
+            if progress_callback:
+                progress_callback(100, "Done")
+        else:
+            _, stderr = process.communicate()
+
+        if process.returncode != 0:
+            raise RuntimeError(stderr)
+
+        return stderr
+
     def get_video_info(self, video_path: str) -> VideoInfo:
         """Получить информацию о видеофайле через ffprobe.
         
@@ -66,7 +125,7 @@ class VideoProcessor:
             VideoInfo с параметрами видео
         """
         cmd = [
-            "ffprobe",
+            self.ffprobe,
             "-v", "error",
             "-show_entries", "stream=codec_name,width,height,r_frame_rate,duration",
             "-show_entries", "format=duration",
@@ -137,26 +196,27 @@ class VideoProcessor:
         temp_output = self.artifacts.project_dir / f"{output_name}.mp4"
         
         cmd = [
-            "ffmpeg", "-y",
+            self.ffmpeg, "-y",
             "-f", "concat",
             "-safe", "0",
             "-i", str(concat_list),
             "-c", "copy",
             str(temp_output)
         ]
-        
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        # TODO: Парсинг прогресса из stderr
-        stdout, stderr = process.communicate()
-        
-        if process.returncode != 0:
-            raise RuntimeError(f"Ошибка склейки: {stderr}")
+
+        # Calculate total duration for progress
+        total_dur = 0
+        for v in videos:
+            try:
+                info = self.get_video_info(v)
+                total_dur += info.duration
+            except Exception:
+                pass
+
+        try:
+            self._run_ffmpeg(cmd, total_dur, progress_callback)
+        except RuntimeError as e:
+            raise RuntimeError(f"Ошибка склейки: {e}")
         
         # Сохраняем артефакт (определяем тип по имени или используем merged_video)
         artifact_type = output_name if output_name in self.artifacts.ARTIFACT_TYPES else "merged_video"
@@ -200,17 +260,18 @@ class VideoProcessor:
         duration = end_time - start_time
         
         cmd = [
-            "ffmpeg", "-y",
+            self.ffmpeg, "-y",
             "-ss", str(start_time),
             "-i", input_path,
             "-t", str(duration),
             "-c", "copy",
             str(temp_output)
         ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Ошибка обрезки: {result.stderr}")
+
+        try:
+            self._run_ffmpeg(cmd, duration, progress_callback)
+        except RuntimeError as e:
+            raise RuntimeError(f"Ошибка обрезки: {e}")
         
         artifact_type = output_name if output_name in self.artifacts.ARTIFACT_TYPES else "merged_video"
         saved_path = self.artifacts.save_artifact(
@@ -251,7 +312,7 @@ class VideoProcessor:
         temp_output = self.artifacts.project_dir / f"{output_name}.{format}"
         
         cmd = [
-            "ffmpeg", "-y",
+            self.ffmpeg, "-y",
             "-i", video_path,
             "-vn",  # Без видео
             "-acodec", "libmp3lame" if format == "mp3" else format,
@@ -322,7 +383,7 @@ class VideoProcessor:
         filter_complex = ";".join(filters)
         
         cmd = [
-            "ffmpeg", "-y",
+            self.ffmpeg, "-y",
             "-i", base_video,
             "-i", overlay_video,
             "-filter_complex", filter_complex,
@@ -378,7 +439,7 @@ class VideoProcessor:
         filter_complex = f"[1:a]volume={overlay_volume}[a1];[0:a][a1]amix=inputs=2:duration=longest"
         
         cmd = [
-            "ffmpeg", "-y",
+            self.ffmpeg, "-y",
             "-i", base_audio,
             "-i", overlay_audio,
             "-filter_complex", filter_complex,
@@ -426,7 +487,7 @@ class VideoProcessor:
         temp_output = self.artifacts.project_dir / f"{output_name}.mp4"
         
         cmd = [
-            "ffmpeg", "-y",
+            self.ffmpeg, "-y",
             "-i", video_path,
             "-i", audio_path,
             "-c:v", "copy",

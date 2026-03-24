@@ -50,7 +50,7 @@ class TitleGenerator:
         Args:
             api_key: Google Gemini API key (or loaded from env GOOGLE_GEMINI_API_KEY)
         """
-        self.api_key = api_key or os.getenv('GOOGLE_GEMINI_API_KEY')
+        self.api_key = api_key or os.getenv('GOOGLE_GEMINI_API_KEY') or os.getenv('GEMINI_API_KEY')
         # Note: API key is optional at init time, can be set later via set_api_key()
         # Methods will check for key before making API calls
     
@@ -238,9 +238,10 @@ Return ONLY the {count} improved titles, one per line, numbered 1-{count}.
             "- 50-60 characters (optimal length)",
             "- Front-load important keywords",
             "- Include numbers if relevant",
-            "- Use power words (Ultimate, Complete, Essential, etc.)",
             "- Be accurate and non-clickbait",
-            "- Optimize for SEO and CTR"
+            "- Optimize for SEO and CTR",
+            "- IMPORTANT: Generate titles in the SAME LANGUAGE as the transcript/description below.",
+            "  If the content is in Russian, titles MUST be in Russian (IT terms like TypeScript, React can stay in English).",
         ]
         
         if transcript:

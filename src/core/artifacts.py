@@ -7,6 +7,11 @@ from datetime import datetime
 from typing import Dict, Optional, List
 import json
 
+try:
+    from config.settings import Settings
+except ImportError:
+    Settings = None
+
 
 class ArtifactsManager:
     """Менеджер артефактов проекта"""
@@ -49,8 +54,11 @@ class ArtifactsManager:
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.project_id = f"{self.project_name}_{self.timestamp}"
         
-        # Корневая папка для всех артефактов
-        self.artifacts_root = Path("output/artifacts")
+        # Корневая папка для всех артефактов (configurable via Settings)
+        if Settings is not None:
+            self.artifacts_root = Settings.ARTIFACTS_DIR
+        else:
+            self.artifacts_root = Path("output/artifacts")
         
         # Папка текущего проекта
         self.project_dir = self.artifacts_root / self.project_id
