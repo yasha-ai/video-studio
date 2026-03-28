@@ -5,10 +5,13 @@ Generates optimized YouTube video descriptions using Google Gemini API
 with multiple variants and customizable templates.
 """
 
+import logging
 import os
 import re
 import requests
 from typing import Optional, List, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 class DescriptionGenerator:
@@ -25,19 +28,85 @@ class DescriptionGenerator:
     # Gemini Text API endpoint
     API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
+    # Default social links
+    DEFAULT_SOCIAL_LINKS = """📱 Соцсети:
+Telegram: https://t.me/daonejuniorday
+⚡️ Поддержать меня на Boosty: https://boosty.to/sovit"""
+
     # Default footer template
     DEFAULT_TEMPLATE = """{description_text}
 
 Таймкоды:
 {timestamps}
 
-🔗 Полезные ссылки:
-(заполните свои ссылки)
+Полезные ссылки:
+{useful_links}
 
-📱 Соцсети:
-(заполните свои соцсети)
+{social_links}
 
 #youtube #видео {hashtags}"""
+
+    # Verified links for technologies (only real, official URLs)
+    TECH_LINKS = {
+        "node.js":      ("Node.js",       "https://nodejs.org/"),
+        "nodejs":       ("Node.js",       "https://nodejs.org/"),
+        "npm":          ("npm",           "https://www.npmjs.com/"),
+        "typescript":   ("TypeScript",    "https://www.typescriptlang.org/"),
+        "react":        ("React",         "https://react.dev/"),
+        "next.js":      ("Next.js",       "https://nextjs.org/"),
+        "nextjs":       ("Next.js",       "https://nextjs.org/"),
+        "vue":          ("Vue.js",        "https://vuejs.org/"),
+        "vue.js":       ("Vue.js",        "https://vuejs.org/"),
+        "svelte":       ("Svelte",        "https://svelte.dev/"),
+        "angular":      ("Angular",       "https://angular.dev/"),
+        "python":       ("Python",        "https://www.python.org/"),
+        "django":       ("Django",        "https://www.djangoproject.com/"),
+        "fastapi":      ("FastAPI",       "https://fastapi.tiangolo.com/"),
+        "flask":        ("Flask",         "https://flask.palletsprojects.com/"),
+        "docker":       ("Docker",        "https://www.docker.com/"),
+        "kubernetes":   ("Kubernetes",    "https://kubernetes.io/"),
+        "git":          ("Git",           "https://git-scm.com/"),
+        "github":       ("GitHub",        "https://github.com/"),
+        "vscode":       ("VS Code",       "https://code.visualstudio.com/"),
+        "vs code":      ("VS Code",       "https://code.visualstudio.com/"),
+        "postgresql":   ("PostgreSQL",    "https://www.postgresql.org/"),
+        "postgres":     ("PostgreSQL",    "https://www.postgresql.org/"),
+        "mongodb":      ("MongoDB",       "https://www.mongodb.com/"),
+        "redis":        ("Redis",         "https://redis.io/"),
+        "tailwind":     ("Tailwind CSS",  "https://tailwindcss.com/"),
+        "webpack":      ("Webpack",       "https://webpack.js.org/"),
+        "vite":         ("Vite",          "https://vite.dev/"),
+        "eslint":       ("ESLint",        "https://eslint.org/"),
+        "prettier":     ("Prettier",      "https://prettier.io/"),
+        "jest":         ("Jest",          "https://jestjs.io/"),
+        "linux":        ("Linux",         "https://www.linux.org/"),
+        "nginx":        ("Nginx",         "https://nginx.org/"),
+        "rust":         ("Rust",          "https://www.rust-lang.org/"),
+        "go":           ("Go",            "https://go.dev/"),
+        "golang":       ("Go",            "https://go.dev/"),
+        "java":         ("Java",          "https://dev.java/"),
+        "kotlin":       ("Kotlin",        "https://kotlinlang.org/"),
+        "swift":        ("Swift",         "https://www.swift.org/"),
+        "flutter":      ("Flutter",       "https://flutter.dev/"),
+        "dart":         ("Dart",          "https://dart.dev/"),
+        "graphql":      ("GraphQL",       "https://graphql.org/"),
+        "prisma":       ("Prisma",        "https://www.prisma.io/"),
+        "sqlalchemy":   ("SQLAlchemy",    "https://www.sqlalchemy.org/"),
+        "express":      ("Express.js",    "https://expressjs.com/"),
+        "nestjs":       ("NestJS",        "https://nestjs.com/"),
+        "aws":          ("AWS",           "https://aws.amazon.com/"),
+        "firebase":     ("Firebase",      "https://firebase.google.com/"),
+        "supabase":     ("Supabase",      "https://supabase.com/"),
+        "vercel":       ("Vercel",        "https://vercel.com/"),
+        "figma":        ("Figma",         "https://www.figma.com/"),
+        "sass":         ("Sass",          "https://sass-lang.com/"),
+        "scss":         ("Sass",          "https://sass-lang.com/"),
+        "pnpm":         ("pnpm",          "https://pnpm.io/"),
+        "yarn":         ("Yarn",          "https://yarnpkg.com/"),
+        "bun":          ("Bun",           "https://bun.sh/"),
+        "deno":         ("Deno",          "https://deno.com/"),
+        "tsconfig":     ("tsconfig",      "https://www.typescriptlang.org/tsconfig/"),
+    }
 
     # Description guidelines
     DESCRIPTION_GUIDELINES = {
@@ -56,14 +125,17 @@ class DescriptionGenerator:
         'full': 'Подробное описание с главами. Полное описание содержания, ключевые моменты, для кого видео.'
     }
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, social_links: Optional[str] = None):
         """
         Initialize Description Generator.
 
         Args:
             api_key: Google Gemini API key (or loaded from env GOOGLE_GEMINI_API_KEY)
+            social_links: Custom social links block for description footer
+                          (defaults to DEFAULT_SOCIAL_LINKS)
         """
         self.api_key = api_key or os.getenv('GOOGLE_GEMINI_API_KEY') or os.getenv('GEMINI_API_KEY')
+        self.social_links = social_links if social_links is not None else self.DEFAULT_SOCIAL_LINKS
         # Note: API key is optional at init time, can be set later via set_api_key()
         # Methods will check for key before making API calls
 
@@ -110,6 +182,8 @@ class DescriptionGenerator:
         # Determine which variants to generate
         variant_keys = list(self.VARIANT_TYPES.keys())[:count]
 
+        logger.info(f"Generating {len(variant_keys)} descriptions")
+
         # Build prompt
         prompt = self._build_generation_prompt(
             transcript=transcript,
@@ -123,6 +197,9 @@ class DescriptionGenerator:
         # Parse descriptions from response
         descriptions = self._parse_descriptions(response_text, variant_keys)
 
+        # Extract useful links from transcript
+        useful_links = self._extract_useful_links(transcript or "")
+
         # Apply template to each description
         result = []
         for desc_data in descriptions:
@@ -130,7 +207,8 @@ class DescriptionGenerator:
                 used_template,
                 description_text=desc_data['text'],
                 timestamps=desc_data['timestamps'],
-                hashtags=desc_data['hashtags']
+                hashtags=desc_data['hashtags'],
+                useful_links=useful_links,
             )
             result.append(formatted)
 
@@ -176,11 +254,14 @@ class DescriptionGenerator:
         prompt_parts.extend([
             "",
             "ТРЕБОВАНИЯ ДЛЯ КАЖДОГО ВАРИАНТА:",
-            "- Первые 150 символов — самые важные (видны до 'Ещё')",
-            "- Включи ключевые слова для SEO",
+            "- ПЕРВЫЕ 2 СТРОКИ — самые важные! Они видны на YouTube без клика 'Ещё'. Должны цеплять и содержать ключевые слова.",
+            "- Включи ключевые слова для SEO в первые предложения",
             "- Текст должен быть естественным и полезным",
-            "- Для medium и full вариантов добавь таймкоды (если есть транскрипт, извлеки реальные темы)",
+            "- ОБЯЗАТЕЛЬНО включи таймкоды прямо в описание (YouTube делает их кликабельными)",
+            "- Добавь призыв к подписке/лайку (CTA)",
             "- Сгенерируй 3-5 релевантных хештегов на основе содержания",
+            "- НИКОГДА не используй треугольные скобки < > ! YouTube удаляет их как HTML.",
+            "  Вместо Generic<T> пиши Generic(T), вместо Array<string> — Array string.",
             "",
             "ФОРМАТ ОТВЕТА (строго соблюдай):",
             ""
@@ -256,8 +337,10 @@ class DescriptionGenerator:
             raise RuntimeError("No text in API response")
 
         except requests.exceptions.RequestException as e:
+            logger.error(f"API call failed: {e}")
             raise RuntimeError(f"Gemini API request failed: {e}")
         except Exception as e:
+            logger.error(f"API call failed: {e}")
             raise RuntimeError(f"Failed to process API response: {e}")
 
     def _parse_descriptions(
@@ -363,16 +446,37 @@ class DescriptionGenerator:
             'hashtags': ' '.join(hashtags) if hashtags else '#youtube #видео'
         }
 
+    def _extract_useful_links(self, transcript: str) -> str:
+        """Extract verified useful links based on technologies mentioned in transcript."""
+        if not transcript:
+            return ""
+
+        text_lower = transcript.lower()
+        found = {}  # name -> url (dedup by name)
+
+        for keyword, (name, url) in self.TECH_LINKS.items():
+            if keyword in text_lower and name not in found:
+                found[name] = url
+
+        logger.info(f"Extracted {len(found)} useful links from transcript")
+        logger.debug(f"Links: {list(found.keys())}")
+
+        if not found:
+            return ""
+
+        lines = [f"  {name}: {url}" for name, url in found.items()]
+        return "\n".join(lines)
+
     def _apply_template(
         self,
         template: str,
         description_text: str,
         timestamps: str,
-        hashtags: str
+        hashtags: str,
+        useful_links: str = "",
     ) -> str:
         """Apply template to description data."""
 
-        # Ensure hashtags always include base tags
         if '#youtube' not in hashtags:
             hashtags = hashtags.strip()
 
@@ -380,8 +484,10 @@ class DescriptionGenerator:
         result = result.replace('{description text}', description_text)
         result = result.replace('{timestamps}', timestamps)
         result = result.replace('{timestamps or "00:00 — Начало"}', timestamps)
+        result = result.replace('{social_links}', self.social_links)
         result = result.replace('{generated hashtags based on content}', hashtags)
         result = result.replace('{hashtags}', hashtags)
+        result = result.replace('{useful_links}', useful_links)
 
         return result
 

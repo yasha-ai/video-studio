@@ -17,22 +17,10 @@ sys.path.append(str(Path(__file__).parent.parent))
 from core.artifacts import ArtifactsManager
 from core.edit_history import EditHistory
 
-# Color palette
-C = {
-    "bg": "#0f0f0f",
-    "surface": "#1a1a1a",
-    "surface2": "#242424",
-    "surface3": "#2e2e2e",
-    "border": "#333333",
-    "text": "#e8e8e8",
-    "text2": "#999999",
-    "text3": "#666666",
-    "accent": "#6c5ce7",
-    "accent_hover": "#5a4bd1",
-    "green": "#00b894",
-    "red": "#ff6b6b",
-    "orange": "#fdcb6e",
-}
+try:
+    from .theme import C, L
+except ImportError:
+    from ui.theme import C, L
 
 
 class TimelinePanel(ctk.CTkFrame):

@@ -1,52 +1,39 @@
 #!/bin/bash
-# Video Studio Launcher Script
+# Video Studio — Launch Script
+cd "$(dirname "$0")"
 
-set -e
-
-# Colors
 GREEN='\033[0;32m'
-BLUE='\033[0;34m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+DIM='\033[0;90m'
+NC='\033[0m'
 
-echo -e "${BLUE}🎬 Video Studio Launcher${NC}"
-echo ""
+echo -e "${GREEN}Video Studio${NC}"
 
-# Check Python version
-if ! command -v python3 &> /dev/null; then
-    echo -e "${RED}❌ Python 3 not found. Please install Python 3.10+${NC}"
+# Python
+if ! command -v python3 &>/dev/null; then
+    echo -e "${RED}Python 3 not found. Install Python 3.10+${NC}"
     exit 1
 fi
 
-PYTHON_VERSION=$(python3 --version | cut -d' ' -f2 | cut -d'.' -f1,2)
-echo -e "${GREEN}✅ Python $PYTHON_VERSION found${NC}"
-
-# Check FFmpeg
-if ! command -v ffmpeg &> /dev/null; then
-    echo -e "${RED}⚠️  FFmpeg not found.${NC}"
-    echo "Please install FFmpeg:"
-    echo "  macOS:   brew install ffmpeg"
-    echo "  Ubuntu:  sudo apt install ffmpeg"
-    echo ""
+# FFmpeg
+if ! command -v ffmpeg &>/dev/null; then
+    echo -e "${RED}FFmpeg not found.${NC}"
+    echo "  macOS:  brew install ffmpeg"
+    echo "  Linux:  sudo apt install ffmpeg"
+    exit 1
 fi
 
-# Check virtual environment
+# Venv
 if [ ! -d "venv" ]; then
-    echo -e "${BLUE}📦 Creating virtual environment...${NC}"
+    echo -e "${DIM}Creating venv...${NC}"
     python3 -m venv venv
 fi
 
-# Activate virtual environment
 source venv/bin/activate
 
-# Install/update dependencies
-echo -e "${BLUE}📦 Checking dependencies...${NC}"
-pip install -q -r requirements.txt
+# Deps
+pip install -q -r requirements.txt 2>/dev/null
 
-# Launch application
-echo -e "${GREEN}🚀 Launching Video Studio...${NC}"
-echo ""
+# Launch
+echo -e "${DIM}Starting...${NC}"
 python3 -m src.main
-
-# Deactivate on exit
-deactivate

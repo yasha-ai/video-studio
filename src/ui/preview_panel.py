@@ -19,22 +19,10 @@ try:
 except ImportError:
     _PIL_AVAILABLE = False
 
-# ---------------------------------------------------------------------------
-# Color palette
-# ---------------------------------------------------------------------------
-C = {
-    "bg": "#0f0f0f",
-    "surface": "#1a1a1a",
-    "surface2": "#242424",
-    "surface3": "#2e2e2e",
-    "border": "#333333",
-    "text": "#e8e8e8",
-    "text2": "#999999",
-    "text3": "#666666",
-    "accent": "#6c5ce7",
-    "green": "#00b894",
-    "red": "#ff6b6b",
-}
+try:
+    from .theme import C, L
+except ImportError:
+    from ui.theme import C, L
 
 # ---------------------------------------------------------------------------
 # Helpers to resolve ffmpeg / ffprobe paths
@@ -230,7 +218,7 @@ class PreviewPanel(ctk.CTkFrame):
 
         self.play_button = ctk.CTkButton(
             controls_frame,
-            text="Open in Player",
+            text="Play Full Video",
             command=self._play_video,
             font=ctk.CTkFont(size=13, weight="bold"),
             height=40,
@@ -397,7 +385,7 @@ class PreviewPanel(ctk.CTkFrame):
             self._frame_count = 0
             self._frame_label.configure(
                 image=None,
-                text="Preview not available — use Open in Player",
+                text="Preview not available — use Play Full Video",
             )
             self._scrubber.configure(state="disabled")
             self._play_pause_btn.configure(state="disabled")
@@ -577,30 +565,22 @@ class PreviewPanel(ctk.CTkFrame):
     # ==================================================================
 
     def _play_video(self):
-        """Открыть видео в системном плеере"""
+        """Play video in embedded player (ffplay)."""
         if not self.video_path:
             return
         try:
-            system = platform.system()
-            if system == "Darwin":
-                subprocess.run(["open", str(self.video_path)], check=True)
-            elif system == "Windows":
-                subprocess.run(["start", str(self.video_path)], shell=True, check=True)
-            else:
-                for player in ["xdg-open", "vlc", "mpv", "mplayer"]:
-                    try:
-                        subprocess.run([player, str(self.video_path)], check=True)
-                        return
-                    except FileNotFoundError:
-                        continue
-                raise FileNotFoundError("No video player found. Install VLC or MPV.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Cannot open video:\n{e}")
-            if self.on_preview_error:
-                self.on_preview_error(str(e))
+            from .media_player import play_media
+        except ImportError:
+            try:
+                from ui.media_player import play_media
+            except ImportError:
+                if self.on_preview_error:
+                    self.on_preview_error("Media player not available")
+                return
+        play_media(self, str(self.video_path))
 
     def _quick_preview(self):
-        """Быстрый просмотр (первые 30 секунд)"""
+        """Quick preview (first 30 seconds) in embedded player."""
         if not self.video_path:
             return
         try:
@@ -608,29 +588,16 @@ class PreviewPanel(ctk.CTkFrame):
             ffmpeg = _get_ffmpeg()
             subprocess.run(
                 [ffmpeg, "-i", str(self.video_path), "-t", "30", "-c", "copy", "-y", str(temp_output)],
-                capture_output=True,
-                check=True,
+                capture_output=True, check=True,
             )
-            system = platform.system()
-            if system == "Darwin":
-                subprocess.run(["open", str(temp_output)], check=True)
-            elif system == "Windows":
-                subprocess.run(["start", str(temp_output)], shell=True, check=True)
-            else:
-                for player in ["xdg-open", "vlc", "mpv"]:
-                    try:
-                        subprocess.run([player, str(temp_output)], check=True)
-                        return
-                    except FileNotFoundError:
-                        continue
-        except subprocess.CalledProcessError as e:
-            messagebox.showerror("Error", f"Cannot create preview:\n{e.stderr}")
-            if self.on_preview_error:
-                self.on_preview_error(str(e))
+            try:
+                from .media_player import play_media
+            except ImportError:
+                from ui.media_player import play_media
+            play_media(self, str(temp_output), title="Quick Preview (30s)")
         except Exception as e:
-            messagebox.showerror("Error", f"Cannot open preview:\n{e}")
             if self.on_preview_error:
-                self.on_preview_error(str(e))
+                self.on_preview_error(f"Preview failed: {e}")
 
     def _open_folder(self):
         """Открыть папку с видео"""

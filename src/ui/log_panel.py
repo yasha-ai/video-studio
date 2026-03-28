@@ -6,20 +6,10 @@ from datetime import datetime
 
 import customtkinter as ctk
 
-C = {
-    "bg": "#0f0f0f",
-    "surface": "#1a1a1a",
-    "surface2": "#242424",
-    "surface3": "#2e2e2e",
-    "border": "#333333",
-    "text": "#e8e8e8",
-    "text2": "#999999",
-    "text3": "#666666",
-    "accent": "#6c5ce7",
-    "green": "#00b894",
-    "red": "#ff6b6b",
-    "orange": "#fdcb6e",
-}
+try:
+    from .theme import C, L
+except ImportError:
+    from ui.theme import C, L
 
 LEVEL_COLORS = {
     "ERROR": C["red"],
@@ -92,6 +82,32 @@ class LogPanel(ctk.CTkFrame):
         for level, color in LEVEL_COLORS.items():
             inner_text.tag_configure(level, foreground=color)
 
+        # Make text selectable + copyable (block typing but allow selection)
+        inner_text.configure(state="normal")
+        inner_text.bind("<Key>", lambda e: "break" if e.keysym not in ("c", "C", "a", "A") or not (e.state & 0x8 or e.state & 0x4) else None)
+
+        # Context menu
+        def _show_log_menu(event):
+            menu = tk.Menu(inner_text, tearoff=0, bg="#2d333b", fg="#e6edf3",
+                           activebackground="#2ea043", activeforeground="#e6edf3",
+                           font=("Helvetica", 12))
+            menu.add_command(label="Copy", command=lambda: self._copy_selection())
+            menu.add_command(label="Copy All", command=lambda: self._copy_all())
+            menu.add_separator()
+            menu.add_command(label="Clear", command=self.clear)
+            menu.tk_popup(event.x_root, event.y_root)
+
+        inner_text.bind("<Button-3>", _show_log_menu)
+        inner_text.bind("<Control-Button-1>", _show_log_menu)
+
+        # Cmd+C / Ctrl+C for copy
+        for mod in ("Command", "Control"):
+            inner_text.bind(f"<{mod}-c>", lambda e: self._copy_selection())
+            inner_text.bind(f"<{mod}-C>", lambda e: self._copy_selection())
+            inner_text.bind(f"<{mod}-a>", lambda e: (inner_text.tag_add("sel", "1.0", "end"), "break")[-1])
+            inner_text.bind(f"<{mod}-A>", lambda e: (inner_text.tag_add("sel", "1.0", "end"), "break")[-1])
+
+        self._inner_text = inner_text
         self._line_count = 0
 
     # ------------------------------------------------------------------
@@ -108,11 +124,25 @@ class LogPanel(ctk.CTkFrame):
             self._toggle_btn.configure(text="\u25bc Logs")
         self._expanded = not self._expanded
 
+    def _copy_selection(self):
+        """Copy selected text to clipboard."""
+        try:
+            text = self._inner_text.selection_get()
+            self._inner_text.clipboard_clear()
+            self._inner_text.clipboard_append(text)
+        except tk.TclError:
+            pass
+
+    def _copy_all(self):
+        """Copy all log text to clipboard."""
+        text = self._inner_text.get("1.0", "end").strip()
+        if text:
+            self._inner_text.clipboard_clear()
+            self._inner_text.clipboard_append(text)
+
     def clear(self):
         """Remove all log entries."""
-        self._textbox.configure(state="normal")
-        self._textbox.delete("1.0", "end")
-        self._textbox.configure(state="disabled")
+        self._inner_text.delete("1.0", "end")
         self._line_count = 0
 
     def append(self, message: str, level: str = "INFO"):
@@ -128,18 +158,16 @@ class LogPanel(ctk.CTkFrame):
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {level:<7} {message}\n"
 
-        self._textbox.configure(state="normal")
-        self._textbox.insert("end", line, tag)
+        self._inner_text.insert("end", line, tag)
         self._line_count += 1
 
         # Auto-trim old entries
         if self._line_count > MAX_LINES:
             trim = self._line_count - MAX_LINES
-            self._textbox.delete("1.0", f"{trim + 1}.0")
+            self._inner_text.delete("1.0", f"{trim + 1}.0")
             self._line_count = MAX_LINES
 
-        self._textbox.configure(state="disabled")
-        self._textbox.see("end")
+        self._inner_text.see("end")
 
 
 class GUILogHandler(logging.Handler):

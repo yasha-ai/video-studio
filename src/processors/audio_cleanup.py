@@ -5,6 +5,7 @@ Cleans and enhances audio using built-in AI filters or Auphonic API.
 Removes noise, echo, breaths, and normalizes volume levels.
 """
 
+import logging
 import os
 import subprocess
 import json
@@ -13,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 class AudioCleanup:
@@ -139,6 +142,8 @@ class AudioCleanup:
         Returns:
             Path to cleaned audio file
         """
+        logger.info(f"Audio cleanup: mode={self.mode}, preset={preset}")
+
         input_path = Path(input_path)
         if not input_path.exists():
             raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -206,8 +211,10 @@ class AudioCleanup:
             target_lufs = params['normalize']
             filters.append(f"loudnorm=I={target_lufs}:dual_mono=true:TP=-1.5:LRA=11")
         
+        logger.info(f"FFmpeg filter chain: {' -> '.join(filters)}")
+
         filter_chain = ','.join(filters)
-        
+
         # Build ffmpeg command
         cmd = [
             'ffmpeg',
@@ -233,10 +240,12 @@ class AudioCleanup:
             
             if progress_callback:
                 progress_callback(1.0)  # Complete
-            
+
+            logger.info(f"Cleanup complete: {output_path}")
             return str(output_path)
-        
+
         except subprocess.CalledProcessError as e:
+            logger.error(f"Cleanup failed: {e}")
             raise RuntimeError(f"ffmpeg audio cleanup failed: {e.stderr}")
     
     def _cleanup_auphonic(
@@ -337,11 +346,13 @@ class AudioCleanup:
                 
                 if progress_callback:
                     progress_callback(1.0)  # Complete
-                
+
+                logger.info(f"Cleanup complete: {output_path}")
                 return str(output_path)
-            
+
             elif status == 'Error':
                 error_msg = status_data.get('error_message', 'Unknown error')
+                logger.error(f"Cleanup failed: {error_msg}")
                 raise RuntimeError(f"Auphonic processing failed: {error_msg}")
             
             # Update progress based on completion percentage

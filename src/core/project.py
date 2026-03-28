@@ -90,6 +90,7 @@ class ProjectManager:
                 "path": str(entry),
                 "completed_steps": state.get("completed_steps", []),
                 "video_name": video_name,
+                "video_path": state.get("video_path", ""),
             })
 
         return projects

@@ -5,11 +5,14 @@ Generates YouTube thumbnail images using Google Gemini Image API.
 Supports multiple style variations and prompt templates.
 """
 
+import logging
 import os
 import io
 from pathlib import Path
 from typing import Optional, List, Callable
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from google import genai
 from google.genai import types
@@ -37,9 +40,10 @@ class CoverGenerator:
         'vibrant': 'vibrant colorful aesthetic, energetic vibe, eye-catching elements',
         'professional': 'professional business style, clean layout, corporate colors',
         'creative': 'creative artistic design, unique visual elements, expressive colors',
-        'dark': 'dark moody atmosphere, dramatic shadows, mysterious vibe',
+        'dark': 'dark moody atmosphere with neon accents, code/terminal in background, mysterious tech vibe',
         'bright': 'bright cheerful design, warm colors, inviting atmosphere',
-        'tech': 'futuristic tech style, neon accents, digital elements'
+        'tech': 'futuristic tech style, neon accents, digital elements',
+        'cozy': 'cozy lifestyle — author at computer/laptop in home office or coffee shop, warm lighting, cup of coffee, learning atmosphere, code on screen if programming topic',
     }
 
     # Preferred image models in order of priority
@@ -102,9 +106,10 @@ class CoverGenerator:
                 )
                 self.model = candidate
                 self._model_resolved = True
-                print(f"Auto-selected image model: {candidate}")
+                logger.info(f"Auto-selected model: {candidate}")
                 return
-            except Exception:
+            except Exception as e:
+                logger.error(f"Cover generation failed: {e}")
                 continue
 
         # Fallback
@@ -129,9 +134,10 @@ class CoverGenerator:
                     name = m["name"].replace("models/", "")
                     if "image" in name.lower() and "generateContent" in str(m.get("supportedGenerationMethods", [])):
                         models.append(name)
+                logger.info(f"Available models: {models}")
                 return models if models else cls.IMAGE_MODELS
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Cover generation failed: {e}")
         return cls.IMAGE_MODELS
 
     def generate_prompt(
@@ -189,6 +195,8 @@ class CoverGenerator:
         Returns:
             List of Paths to generated image files
         """
+        logger.info(f"Generating {count} covers, model={self.model}")
+
         if not 1 <= count <= 4:
             raise ValueError("Cover count must be between 1 and 4")
 
@@ -231,6 +239,7 @@ class CoverGenerator:
             filepath = output_dir / filename
 
             image_data.save(filepath, "PNG")
+            logger.info(f"Cover {i}/{count} saved: {filepath}")
             generated_paths.append(filepath)
 
             if progress_callback:

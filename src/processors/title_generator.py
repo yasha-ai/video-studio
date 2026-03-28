@@ -5,10 +5,13 @@ Generates optimized YouTube video titles using Google Gemini API
 and provides AI-powered critique and improvement suggestions.
 """
 
+import logging
 import os
 import requests
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 class TitleGenerator:
@@ -85,12 +88,14 @@ class TitleGenerator:
             ValueError: If insufficient input data
             RuntimeError: If API call fails
         """
+        logger.info(f"Generating {count} titles, style={style}")
+
         if not transcript and not description:
             raise ValueError("Either transcript or description is required")
-        
+
         if not 1 <= count <= 10:
             raise ValueError("Count must be between 1 and 10")
-        
+
         # Build prompt
         prompt = self._build_generation_prompt(
             transcript=transcript,
@@ -106,7 +111,8 @@ class TitleGenerator:
         
         # Parse titles from response
         titles = self._parse_titles(response_text, count)
-        
+
+        logger.info(f"Generated {len(titles)} titles")
         return titles
     
     def critique_title(
@@ -137,6 +143,8 @@ class TitleGenerator:
                 'length_check': bool
             }
         """
+        logger.info(f"Critiquing title: {title[:50]}...")
+
         # Build critique prompt
         prompt = self._build_critique_prompt(
             title=title,
@@ -150,7 +158,9 @@ class TitleGenerator:
         
         # Parse critique
         critique = self._parse_critique(response_text)
-        
+
+        logger.info(f"Critique score: {critique.get('score')}/100")
+
         # Add basic checks
         critique['length_check'] = len(title) <= self.TITLE_GUIDELINES['max_length']
         
@@ -242,6 +252,8 @@ Return ONLY the {count} improved titles, one per line, numbered 1-{count}.
             "- Optimize for SEO and CTR",
             "- IMPORTANT: Generate titles in the SAME LANGUAGE as the transcript/description below.",
             "  If the content is in Russian, titles MUST be in Russian (IT terms like TypeScript, React can stay in English).",
+            "- NEVER use angle brackets < > ! YouTube treats them as HTML and removes them.",
+            "  Write Generic(T) instead of Generic<T>, Array string instead of Array<string>.",
         ]
         
         if transcript:
@@ -385,7 +397,9 @@ Return ONLY the {count} improved titles, one per line, numbered 1-{count}.
         }
         
         url = f"{self.API_URL}?key={self.api_key}"
-        
+
+        logger.debug(f"Prompt: {prompt[:200]}...")
+
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=30)
             response.raise_for_status()
@@ -401,8 +415,10 @@ Return ONLY the {count} improved titles, one per line, numbered 1-{count}.
             raise RuntimeError("No text in API response")
             
         except requests.exceptions.RequestException as e:
+            logger.error(f"API call failed: {e}")
             raise RuntimeError(f"Gemini API request failed: {e}")
         except Exception as e:
+            logger.error(f"API call failed: {e}")
             raise RuntimeError(f"Failed to process API response: {e}")
     
     def _parse_titles(self, response_text: str, expected_count: int) -> List[str]:
