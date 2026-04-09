@@ -245,7 +245,7 @@ def transcribe_chunked(
         for i, (chunk_path, offset) in enumerate(chunks):
             pct = 20 + int(70 * i / len(chunks))
             if progress_callback:
-                progress_callback(pct, f"Transcribing chunk {i+1}/{len(chunks)}...")
+                progress_callback(pct, f"Транскрибация {i+1}/{len(chunks)}...")
 
             logger.info(f"Transcribing chunk {i+1}/{len(chunks)} (offset {offset:.1f}s)")
             srt_text = transcribe_fn(chunk_path)

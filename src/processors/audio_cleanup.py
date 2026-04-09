@@ -9,6 +9,7 @@ import logging
 import os
 import subprocess
 import json
+import re
 import requests
 import time
 from pathlib import Path
@@ -228,16 +229,45 @@ class AudioCleanup:
         
         if progress_callback:
             progress_callback(0.1)  # Starting
-        
-        # Run ffmpeg
+
+        # Get audio duration for progress calculation
+        total_dur = 0
         try:
-            result = subprocess.run(
+            probe_cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                         '-of', 'default=noprint_wrappers=1:nokey=1', str(input_path)]
+            dur_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
+            total_dur = float(dur_result.stdout.strip())
+        except Exception:
+            pass
+
+        # Run ffmpeg with progress parsing
+        try:
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                check=True
             )
-            
+
+            if progress_callback and total_dur > 0:
+                stderr_lines = []
+                time_re = re.compile(r"time=(\d+):(\d+):(\d+)\.(\d+)")
+                for line in process.stderr:
+                    stderr_lines.append(line)
+                    m = time_re.search(line)
+                    if m:
+                        h, mn, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+                        current = h * 3600 + mn * 60 + s + ms / 100
+                        pct = min(1.0, current / total_dur)
+                        progress_callback(pct)
+                process.wait()
+                stderr = "".join(stderr_lines)
+            else:
+                _, stderr = process.communicate()
+
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, cmd, stderr=stderr)
+
             if progress_callback:
                 progress_callback(1.0)  # Complete
 

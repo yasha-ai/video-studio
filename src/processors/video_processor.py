@@ -157,11 +157,11 @@ class VideoProcessor:
                     h, mn, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
                     current = h * 3600 + mn * 60 + s + ms / 100
                     pct = min(100.0, (current / total_duration) * 100)
-                    progress_callback(pct, f"Processing... {pct:.0f}%")
+                    progress_callback(pct, f"Обработка... {pct:.0f}%")
             process.wait()
             stderr = "".join(stderr_lines)
             if progress_callback:
-                progress_callback(100, "Done")
+                progress_callback(100, "Готово")
         else:
             _, stderr = process.communicate()
 
@@ -700,10 +700,15 @@ class VideoProcessor:
 
         # Position mapping
         pos_map = {
-            "bottom-left": "20:H-h-20",
-            "bottom-right": "W-w-20:H-h-20",
             "top-left": "20:20",
+            "top-center": "(W-w)/2:20",
             "top-right": "W-w-20:20",
+            "center-left": "20:(H-h)/2",
+            "center": "(W-w)/2:(H-h)/2",
+            "center-right": "W-w-20:(H-h)/2",
+            "bottom-left": "20:H-h-20",
+            "bottom-center": "(W-w)/2:H-h-20",
+            "bottom-right": "W-w-20:H-h-20",
         }
         overlay_pos = pos_map.get(position, pos_map["bottom-left"])
 

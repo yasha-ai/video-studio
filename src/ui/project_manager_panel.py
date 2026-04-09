@@ -22,8 +22,8 @@ except ImportError:
     from ui.theme import C, L
 
 
-class ProjectManagerPanel(ctk.CTkToplevel):
-    """Окно управления проектами — список, создание, удаление."""
+class ProjectManagerPanel(ctk.CTkFrame):
+    """Панель управления проектами — список, создание, удаление."""
 
     def __init__(
         self,
@@ -33,17 +33,10 @@ class ProjectManagerPanel(ctk.CTkToplevel):
         on_project_create: Optional[Callable[[str], None]] = None,
         current_video_path: Optional[str] = None,
         on_current_deleted: Optional[Callable[[], None]] = None,
+        is_embedded: bool = False,
         **kwargs,
     ):
-        """
-        Args:
-            master: Родительское окно.
-            project_manager: Экземпляр ProjectManager.
-            on_project_open: Callback при открытии проекта.
-            on_project_create: Callback при создании проекта.
-            current_video_path: Path to currently active video (to detect "delete current").
-            on_current_deleted: Callback when the current project is deleted.
-        """
+        kwargs.setdefault("fg_color", C["bg"])
         super().__init__(master, **kwargs)
 
         self.pm = project_manager
@@ -54,13 +47,6 @@ class ProjectManagerPanel(ctk.CTkToplevel):
         self._selected_index: Optional[int] = None
         self._card_frames: list[ctk.CTkFrame] = []
         self._projects: list[dict] = []
-
-        # Window setup
-        self.title("Projects")
-        self.geometry("720x560")
-        self.configure(fg_color=C["bg"])
-        self.resizable(True, True)
-        self.minsize(500, 400)
 
         self._build_ui()
         self._refresh_list()
@@ -74,13 +60,13 @@ class ProjectManagerPanel(ctk.CTkToplevel):
         top.pack_propagate(False)
 
         ctk.CTkLabel(
-            top, text="Projects", font=ctk.CTkFont(size=18, weight="bold"),
+            top, text="Проекты", font=ctk.CTkFont(size=18, weight="bold"),
             text_color=C["text"],
         ).pack(side="left", padx=20)
 
         btn_new = ctk.CTkButton(
             top,
-            text="+ New Project",
+            text="+ Новый проект",
             width=140,
             height=34,
             corner_radius=8,
@@ -108,7 +94,7 @@ class ProjectManagerPanel(ctk.CTkToplevel):
 
         self._btn_open = ctk.CTkButton(
             bottom,
-            text="Open",
+            text="Открыть",
             width=100,
             height=34,
             corner_radius=8,
@@ -121,9 +107,24 @@ class ProjectManagerPanel(ctk.CTkToplevel):
         )
         self._btn_open.pack(side="left", padx=20, pady=9)
 
+        self._btn_folder = ctk.CTkButton(
+            bottom,
+            text="📁 Папка",
+            width=110,
+            height=34,
+            corner_radius=8,
+            fg_color=C["surface3"],
+            hover_color=C["accent_dim"],
+            text_color=C["text"],
+            font=ctk.CTkFont(size=13),
+            command=self._on_open_folder,
+            state="disabled",
+        )
+        self._btn_folder.pack(side="left", padx=4, pady=9)
+
         self._btn_delete = ctk.CTkButton(
             bottom,
-            text="Delete",
+            text="Удалить",
             width=100,
             height=34,
             corner_radius=8,
@@ -151,7 +152,7 @@ class ProjectManagerPanel(ctk.CTkToplevel):
         if not self._projects:
             placeholder = ctk.CTkLabel(
                 self._scroll,
-                text="No projects yet.\nClick  + New Project  to get started.",
+                text="Проектов пока нет.\nНажми  + Новый проект  чтобы начать.",
                 font=ctk.CTkFont(size=14),
                 text_color=C["text3"],
                 justify="center",
@@ -201,9 +202,9 @@ class ProjectManagerPanel(ctk.CTkToplevel):
             current_name = Path(self._current_video_path).name if self._current_video_path else ""
             is_current = proj_video == current_name
 
-        display_name = project.get("name", "Untitled")
+        display_name = project.get("name", "Без названия")
         if is_current:
-            display_name = f"{display_name}  (current)"
+            display_name = f"{display_name}  (текущий)"
             card.configure(border_color=C["green"])
 
         name_label = ctk.CTkLabel(
@@ -218,7 +219,7 @@ class ProjectManagerPanel(ctk.CTkToplevel):
         name_label.bind("<Double-Button-1>", _dbl)
 
         video_name = project.get("video_name", "")
-        sub_text = video_name if video_name else "no video"
+        sub_text = video_name if video_name else "нет видео"
         sub_label = ctk.CTkLabel(
             left,
             text=sub_text,
@@ -237,7 +238,7 @@ class ProjectManagerPanel(ctk.CTkToplevel):
         right.bind("<Double-Button-1>", _dbl)
 
         steps = project.get("completed_steps", [])
-        steps_text = f"{len(steps)} step{'s' if len(steps) != 1 else ''}"
+        steps_text = f"{len(steps)} шаг."
         steps_color = C["green"] if len(steps) >= 4 else C["text2"]
         steps_label = ctk.CTkLabel(
             right,
@@ -289,6 +290,7 @@ class ProjectManagerPanel(ctk.CTkToplevel):
         has_selection = self._selected_index is not None
         state = "normal" if has_selection else "disabled"
         self._btn_open.configure(state=state)
+        self._btn_folder.configure(state=state)
         self._btn_delete.configure(state=state)
 
     # ── Actions ─────────────────────────────────────────────────
@@ -296,7 +298,7 @@ class ProjectManagerPanel(ctk.CTkToplevel):
     def _on_new_project(self):
         """Диалог выбора видео -> создание проекта."""
         video_path = filedialog.askopenfilename(
-            title="Select a video file",
+            title="Выбери видеофайл",
             filetypes=[
                 ("Video files", "*.mp4 *.mkv *.mov *.avi *.webm *.m4v"),
                 ("All files", "*.*"),
@@ -312,13 +314,49 @@ class ProjectManagerPanel(ctk.CTkToplevel):
         try:
             state = self.pm.create_project(name, video_path)
         except Exception as exc:
-            messagebox.showerror("Error", f"Failed to create project:\n{exc}", parent=self)
+            messagebox.showerror("Ошибка", f"Не удалось создать проект:\n{exc}", parent=self)
             return
 
         self._refresh_list()
 
         if self.on_project_create:
             self.on_project_create(video_path)
+
+    def _on_open_folder(self):
+        """Открыть папку проекта в Finder/Explorer."""
+        if self._selected_index is None:
+            return
+        project = self._projects[self._selected_index]
+        video_path = project.get("video_path", "")
+        if not video_path:
+            return
+
+        # Find work directory
+        video_parent = Path(video_path).parent
+        video_stem = Path(video_path).stem
+        work_dir = video_parent / f"video_studio_{video_stem}"
+
+        # If exact match doesn't exist, try to find with (N) suffix
+        if not work_dir.exists():
+            for d in video_parent.iterdir():
+                if d.is_dir() and d.name.startswith(f"video_studio_{video_stem}"):
+                    work_dir = d
+                    break
+
+        folder = work_dir if work_dir.exists() else video_parent
+
+        import subprocess as sp
+        import platform
+        system = platform.system()
+        try:
+            if system == "Darwin":
+                sp.Popen(["open", str(folder)])
+            elif system == "Windows":
+                sp.Popen(["explorer", str(folder)])
+            else:
+                sp.Popen(["xdg-open", str(folder)])
+        except Exception:
+            pass
 
     def _on_open(self):
         """Открывает выбранный проект через callback."""
@@ -331,7 +369,7 @@ class ProjectManagerPanel(ctk.CTkToplevel):
         try:
             state = self.pm.open_project(project_path)
         except Exception as exc:
-            messagebox.showerror("Error", f"Failed to open project:\n{exc}", parent=self)
+            messagebox.showerror("Ошибка", f"Не удалось открыть проект:\n{exc}", parent=self)
             return
 
         if self.on_project_open:
@@ -345,7 +383,7 @@ class ProjectManagerPanel(ctk.CTkToplevel):
             return
 
         project = self._projects[self._selected_index]
-        name = project.get("name", "Untitled")
+        name = project.get("name", "Без названия")
 
         is_current = False
         if self._current_video_path:
@@ -353,10 +391,26 @@ class ProjectManagerPanel(ctk.CTkToplevel):
             current_name = Path(self._current_video_path).name if self._current_video_path else ""
             is_current = proj_video == current_name
 
+        # Detect what exists in work dir
+        video_path = project.get("video_path") or ""
+        video_parent = Path(video_path).parent if video_path else None
+        video_stem = Path(video_path).stem if video_path else ""
+        work_dir = None
+        if video_parent and video_parent.exists():
+            for d in video_parent.iterdir():
+                if d.is_dir() and d.name.startswith(f"video_studio_{video_stem}"):
+                    work_dir = d
+                    break
+
+        has_thumbnails = work_dir and (work_dir / "thumbnails").exists() if work_dir else False
+        has_audio = work_dir and any(work_dir.glob("audio_cleaned*")) if work_dir else False
+        has_assembled = work_dir and any(work_dir.glob("*_assembled*")) if work_dir else False
+        has_transcripts = work_dir and (work_dir / "subtitles.srt").exists() if work_dir else False
+
         # Show delete options dialog
         dlg = ctk.CTkToplevel(self)
-        dlg.title("Delete Project")
-        dlg.geometry("460x380")
+        dlg.title("Удаление проекта")
+        dlg.geometry("460x420")
         dlg.transient(self)
         dlg.grab_set()
         dlg.configure(fg_color=C["bg"])
@@ -365,46 +419,70 @@ class ProjectManagerPanel(ctk.CTkToplevel):
         inner.pack(fill="both", expand=True, padx=24, pady=20)
 
         ctk.CTkLabel(
-            inner, text=f'Delete "{name}"?',
+            inner, text=f'Удалить «{name}»?',
             font=ctk.CTkFont(size=16, weight="bold"), text_color=C["text"],
         ).pack(anchor="w", pady=(0, 4))
 
         if is_current:
             ctk.CTkLabel(
-                inner, text="This is your current project. The app will reset.",
+                inner, text="Это текущий проект. Приложение сбросится.",
                 font=ctk.CTkFont(size=12), text_color=C["red"],
             ).pack(anchor="w", pady=(0, 8))
 
         ctk.CTkLabel(
-            inner, text="Choose what to delete:",
+            inner, text="Что удалить:",
             font=ctk.CTkFont(size=13), text_color=C["text2"],
         ).pack(anchor="w", pady=(8, 8))
 
-        # Checkboxes
-        del_project = ctk.BooleanVar(value=True)
-        del_generated = ctk.BooleanVar(value=True)
-        del_thumbnails = ctk.BooleanVar(value=True)
-        del_audio = ctk.BooleanVar(value=True)
+        # Checkboxes — all unchecked by default, grey if not present
+        del_project = ctk.BooleanVar(value=False)
+        del_thumbnails = ctk.BooleanVar(value=False)
+        del_audio = ctk.BooleanVar(value=False)
+        del_generated = ctk.BooleanVar(value=False)
         del_transcripts = ctk.BooleanVar(value=False)
 
-        ctk.CTkCheckBox(inner, text="Project data (artifacts folder)", variable=del_project,
-                         font=ctk.CTkFont(size=12), fg_color=C["accent"], text_color=C["text"],
-                         state="disabled").pack(anchor="w", pady=2)
+        item_vars = []
 
-        ctk.CTkCheckBox(inner, text="Generated thumbnails", variable=del_thumbnails,
-                         font=ctk.CTkFont(size=12), fg_color=C["accent"], text_color=C["text"]).pack(anchor="w", pady=2)
+        def _make_checkbox(parent, text, var, exists):
+            color = C["text"] if exists else C["text3"]
+            state = "normal" if exists else "disabled"
+            cb = ctk.CTkCheckBox(
+                parent, text=text, variable=var,
+                font=ctk.CTkFont(size=12), fg_color=C["accent"], text_color=color,
+                state=state, command=_on_item_toggle,
+            )
+            cb.pack(anchor="w", pady=2)
+            if exists:
+                item_vars.append(var)
+            return cb
 
-        ctk.CTkCheckBox(inner, text="Cleaned audio files", variable=del_audio,
-                         font=ctk.CTkFont(size=12), fg_color=C["accent"], text_color=C["text"]).pack(anchor="w", pady=2)
+        # "Select all" checkbox
+        select_all_var = ctk.BooleanVar(value=False)
 
-        ctk.CTkCheckBox(inner, text="Assembled / rendered videos", variable=del_generated,
-                         font=ctk.CTkFont(size=12), fg_color=C["accent"], text_color=C["text"]).pack(anchor="w", pady=2)
+        def _on_select_all():
+            val = select_all_var.get()
+            for v in item_vars:
+                v.set(val)
 
-        ctk.CTkCheckBox(inner, text="Transcription files", variable=del_transcripts,
-                         font=ctk.CTkFont(size=12), fg_color=C["accent"], text_color=C["text"]).pack(anchor="w", pady=2)
+        def _on_item_toggle():
+            # Auto-check "select all" if all items are checked
+            all_checked = all(v.get() for v in item_vars) if item_vars else False
+            select_all_var.set(all_checked)
+
+        ctk.CTkCheckBox(
+            inner, text="Выбрать всё", variable=select_all_var,
+            font=ctk.CTkFont(size=12, weight="bold"), fg_color=C["accent"], text_color=C["text"],
+            command=_on_select_all,
+        ).pack(anchor="w", pady=(0, 6))
+
+        _make_checkbox(inner, "Данные проекта (папка артефактов)", del_project, True)
+        _make_checkbox(inner, "Сгенерированные обложки", del_thumbnails, has_thumbnails)
+        _make_checkbox(inner, "Очищенные аудиофайлы", del_audio, has_audio)
+        _make_checkbox(inner, "Склеенные видео", del_generated, has_assembled)
+        _make_checkbox(inner, "Файлы транскрипции", del_transcripts, has_transcripts)
 
         ctk.CTkLabel(
-            inner, text="Original video file is NEVER deleted.",
+            inner, text="Оригинальный видеофайл НИКОГДА не удаляется.",
             font=ctk.CTkFont(size=11), text_color=C["text3"],
         ).pack(anchor="w", pady=(12, 0))
 
@@ -482,14 +560,14 @@ class ProjectManagerPanel(ctk.CTkToplevel):
                 self._refresh_list()
 
         ctk.CTkButton(
-            btn_row, text="Delete", width=120, height=36,
+            btn_row, text="Удалить", width=120, height=36,
             font=ctk.CTkFont(size=13, weight="bold"),
             fg_color=C["red"], hover_color="#cc5555", text_color="#ffffff",
             command=do_delete,
         ).pack(side="right", padx=4)
 
         ctk.CTkButton(
-            btn_row, text="Cancel", width=100, height=36,
+            btn_row, text="Отмена", width=100, height=36,
             font=ctk.CTkFont(size=13),
             fg_color=C["surface3"], hover_color=C["border"], text_color=C["text"],
             command=dlg.destroy,

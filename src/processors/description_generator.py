@@ -122,7 +122,13 @@ Telegram: https://t.me/daonejuniorday
     VARIANT_TYPES = {
         'short': 'Короткое описание (2-3 строки). Максимально ёмко передай суть видео.',
         'medium': 'Описание средней длины (абзац + таймкоды). Раскрой тему и добавь структуру.',
-        'full': 'Подробное описание с главами. Полное описание содержания, ключевые моменты, для кого видео.'
+        'full': 'Подробное описание с главами. Полное описание содержания, ключевые моменты, для кого видео.',
+        'seo': 'SEO-оптимизированное описание. Максимум ключевых слов естественно вплетены в текст, первые 2 строки — самые важные.',
+        'storytelling': 'Описание в формате истории. Зацепи зрителя с первой строки, создай интригу, подведи к просмотру.',
+        'tutorial': 'Описание для туториала. Чёткий список того, что зритель узнает, пререквизиты, уровень сложности.',
+        'engagement': 'Описание с фокусом на вовлечение. Вопросы к аудитории, призывы к комментариям, CTA на подписку.',
+        'minimal': 'Минималистичное описание (1-2 строки + таймкоды). Только суть, без воды.',
+        'professional': 'Профессиональное описание. Экспертный тон, ссылки на документацию, для опытной аудитории.',
     }
 
     def __init__(self, api_key: Optional[str] = None, social_links: Optional[str] = None):
@@ -174,8 +180,8 @@ Telegram: https://t.me/daonejuniorday
         if not transcript and not title:
             raise ValueError("Either transcript or title is required")
 
-        if not 1 <= count <= 3:
-            raise ValueError("Count must be between 1 and 3")
+        if not 1 <= count <= 9:
+            raise ValueError("Count must be between 1 and 9")
 
         used_template = template or self.DEFAULT_TEMPLATE
 
@@ -234,11 +240,12 @@ Telegram: https://t.me/daonejuniorday
             ])
 
         if transcript:
-            # Use first 2000 chars of transcript for more context
-            snippet = transcript[:2000] + ("..." if len(transcript) > 2000 else "")
             prompt_parts.extend([
-                "ТРАНСКРИПТ ВИДЕО:",
-                snippet,
+                "ТРАНСКРИПТ ВИДЕО (с таймкодами в формате SRT):",
+                transcript,
+                "",
+                "ВАЖНО: Используй ВСЕ таймкоды из транскрипта для генерации главной структуры видео.",
+                "Таймкоды должны покрывать всё видео от начала до конца, а не только первую минуту!",
                 ""
             ])
 

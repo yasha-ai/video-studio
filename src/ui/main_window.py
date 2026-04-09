@@ -6,6 +6,7 @@ import os
 import logging
 import customtkinter as ctk
 from pathlib import Path
+import queue
 
 logger = logging.getLogger(__name__)
 from tkinter import filedialog, messagebox
@@ -48,10 +49,11 @@ except ImportError:
     HAS_PIL = False
 
 try:
-    from tkinterdnd2 import DND_FILES
+    from tkinterdnd2 import DND_FILES, TkinterDnD
     HAS_DND = True
 except ImportError:
     HAS_DND = False
+    TkinterDnD = None
 
 
 try:
@@ -91,7 +93,17 @@ class MainWindow(ctk.CTk):
     PROJECT_FILE = (Settings.OUTPUT_DIR / ".video_studio_project.json") if Settings else Path("output/.video_studio_project.json")
 
     def __init__(self):
-        super().__init__()
+        # Patch Tk base for drag-and-drop support before CTk.__init__
+        if HAS_DND and TkinterDnD is not None:
+            import tkinter as _tk
+            _original_tk = _tk.Tk
+            _tk.Tk = TkinterDnD.Tk
+            try:
+                super().__init__()
+            finally:
+                _tk.Tk = _original_tk
+        else:
+            super().__init__()
 
         self.title("Video Studio")
         self.geometry("1440x900")
@@ -137,9 +149,16 @@ class MainWindow(ctk.CTk):
         self._sidebar_buttons: dict[str, ctk.CTkButton] = {}
         self._sidebar_badges: dict[str, ctk.CTkLabel] = {}
 
+        # Thread-safe UI update queue — avoids GIL/tkinter freezes
+        self._ui_queue: queue.Queue = queue.Queue()
+        # Counter for parallel pre-thumbnail steps (titles + descriptions)
+        self._pre_thumb_done = 0
+        self._pre_thumb_lock = threading.Lock()
+
         self._load_project()
         self._setup_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._poll_ui_queue()
         self.after(500, self._validate_environment)
 
     # ══════════════════════════════════════════
@@ -174,7 +193,7 @@ class MainWindow(ctk.CTk):
     # ══════════════════════════════════════════
 
     def _save_project(self):
-        """Save project state to disk."""
+        """Save project state to disk + export artifacts to work dir."""
         logger.debug("Saving project state")
         try:
             self.PROJECT_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -262,6 +281,124 @@ class MainWindow(ctk.CTk):
         except Exception as e:
             logger.error(f"Could not load project: {e}")
 
+    def _show_restore_dialog(self):
+        """Show a dialog offering to restore interrupted session."""
+        video_name = Path(self.project["video_path"]).name
+        done = len(self.completed_steps)
+        total = len(self.STEPS)
+        pending = [s["label"] for s in self.STEPS if s["id"] not in self.completed_steps]
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Восстановление сессии")
+        dialog.geometry("480x320")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        # Center on parent
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - 480) // 2
+        y = self.winfo_y() + (self.winfo_height() - 320) // 2
+        dialog.geometry(f"+{x}+{y}")
+        dialog.configure(fg_color=C["surface"])
+
+        inner = ctk.CTkFrame(dialog, fg_color="transparent")
+        inner.pack(expand=True, fill="both", padx=28, pady=24)
+
+        ctk.CTkLabel(
+            inner, text="Незавершённый проект",
+            font=ctk.CTkFont(size=18, weight="bold"), text_color=C["text"],
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            inner, text=f"Файл: {video_name}",
+            font=ctk.CTkFont(size=13), text_color=C["accent"],
+        ).pack(anchor="w", pady=(8, 4))
+
+        ctk.CTkLabel(
+            inner, text=f"Выполнено шагов: {done} из {total}",
+            font=ctk.CTkFont(size=12), text_color=C["text2"],
+        ).pack(anchor="w")
+
+        if pending:
+            pending_text = ", ".join(pending[:4])
+            if len(pending) > 4:
+                pending_text += f" и ещё {len(pending) - 4}"
+            ctk.CTkLabel(
+                inner, text=f"Осталось: {pending_text}",
+                font=ctk.CTkFont(size=12), text_color=C["text3"], wraplength=420,
+            ).pack(anchor="w", pady=(2, 0))
+
+        # Progress bar
+        progress = ctk.CTkProgressBar(inner, height=8, corner_radius=4, fg_color=C["surface3"], progress_color=C["accent"])
+        progress.pack(fill="x", pady=(16, 20))
+        progress.set(done / total if total else 0)
+
+        btn_row = ctk.CTkFrame(inner, fg_color="transparent")
+        btn_row.pack(fill="x")
+
+        def restore():
+            dialog.destroy()
+            self._resume_pipeline()
+
+        def start_new():
+            dialog.destroy()
+            self._reset_project()
+            self._show_import_panel()
+
+        ctk.CTkButton(
+            btn_row, text="Продолжить работу",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            height=40, corner_radius=10,
+            fg_color=C["accent"], hover_color=C["accent_hover"], text_color=C["text"],
+            command=restore,
+        ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+
+        ctk.CTkButton(
+            btn_row, text="Начать заново",
+            font=ctk.CTkFont(size=14),
+            height=40, corner_radius=10,
+            fg_color=C["surface3"], hover_color=C["border"], text_color=C["text2"],
+            command=start_new,
+        ).pack(side="left", expand=True, fill="x", padx=(6, 0))
+
+    def _resume_pipeline(self):
+        """Resume interrupted pipeline from where it left off."""
+        # Show the active step panel
+        step_method = None
+        for s in self.STEPS:
+            if s["id"] == self.active_step:
+                step_method = s["method"]
+                break
+        if step_method and hasattr(self, step_method):
+            getattr(self, step_method)()
+        else:
+            self._show_import_panel()
+
+        # Re-init artifacts with correct project name
+        video_name = Path(self.project.get("video_path", "untitled")).stem
+        self.artifacts = ArtifactsManager(project_name=video_name)
+        self.video_processor.artifacts = self.artifacts
+
+        # Resume auto-pipeline for incomplete steps
+        self._pre_thumb_done = 0
+        if "transcribe" not in self.completed_steps:
+            self.after(500, self._auto_transcribe)
+
+    def _reset_project(self):
+        """Clear project state for a fresh start."""
+        for key in self.project:
+            self.project[key] = None if key != "titles" else []
+        self.project["titles"] = []
+        self.project["descriptions"] = []
+        self.project["thumbnail_paths"] = []
+        self.project["use_cleaned_audio"] = True
+        self.completed_steps.clear()
+        self.active_step = "import"
+        for step_id, badge in self._sidebar_badges.items():
+            badge.configure(text="")
+        self._save_project()
+
     def _on_close(self):
         """Save state and exit cleanly — avoid SIGSEGV from background threads."""
         self._save_project()
@@ -346,7 +483,7 @@ class MainWindow(ctk.CTk):
                 fg_color="transparent", text_color=style["text"],
                 hover_color=style["bg"],
                 border_width=1, border_color=style["border"],
-                command=lambda: (toast.destroy(), self._open_settings()),
+                command=lambda: (toast.destroy(), self._show_settings_panel()),
             ).pack(side="right", padx=(0, 8))
 
         # Dismiss button
@@ -419,25 +556,16 @@ class MainWindow(ctk.CTk):
             font=ctk.CTkFont(size=12),
             fg_color="transparent", text_color=C["text2"],
             hover_color=C["surface3"], height=32, anchor="w",
-            command=self._open_projects,
+            command=self._show_projects_panel,
         )
         projects_btn.pack(fill="x", pady=(0, 4))
-
-        batch_btn = ctk.CTkButton(
-            bottom, text=L["batch"],
-            font=ctk.CTkFont(size=12),
-            fg_color="transparent", text_color=C["text2"],
-            hover_color=C["surface3"], height=32, anchor="w",
-            command=self._open_batch,
-        )
-        batch_btn.pack(fill="x", pady=(0, 4))
 
         settings_btn = ctk.CTkButton(
             bottom, text=L["settings"],
             font=ctk.CTkFont(size=12),
             fg_color="transparent", text_color=C["text2"],
             hover_color=C["surface3"], height=32, anchor="w",
-            command=self._open_settings,
+            command=self._show_settings_panel,
         )
         settings_btn.pack(fill="x", pady=(0, 4))
 
@@ -446,7 +574,7 @@ class MainWindow(ctk.CTk):
             font=ctk.CTkFont(size=12),
             fg_color="transparent", text_color=C["text2"],
             hover_color=C["surface3"], height=32, anchor="w",
-            command=self._open_help,
+            command=self._show_help_panel,
         )
         help_btn.pack(fill="x")
 
@@ -494,7 +622,7 @@ class MainWindow(ctk.CTk):
         self._prev_btn.pack(side="left", padx=(0, 4))
 
         self.topbar_title = ctk.CTkLabel(
-            nav_frame, text="Import Video",
+            nav_frame, text="Импорт видео",
             font=ctk.CTkFont(size=14, weight="bold"), text_color=C["text"],
         )
         self.topbar_title.pack(side="left", padx=12)
@@ -523,7 +651,11 @@ class MainWindow(ctk.CTk):
             if step_id in self._sidebar_badges:
                 self._sidebar_badges[step_id].configure(text="  \u2713", text_color=C["green"])
 
-        self._show_import_panel()
+        # Check for interrupted session
+        if self.project.get("video_path") and "import" in self.completed_steps:
+            self.after(300, self._show_restore_dialog)
+        else:
+            self._show_import_panel()
 
     # --- Sidebar step ---
 
@@ -670,6 +802,83 @@ class MainWindow(ctk.CTk):
             self._sidebar_badges[step_id].configure(text="")
             self._save_project()
 
+    def _save_artifacts(self, project: dict = None):
+        """Save all generated artifacts as files in the project work directory."""
+        if project is None:
+            project = self.project
+        wd = project.get("work_dir")
+        if not wd or not Path(wd).exists():
+            return
+        wd = Path(wd)
+
+        # Subtitles (SRT)
+        transcription = project.get("transcription")
+        if transcription:
+            (wd / "subtitles.srt").write_text(transcription, encoding="utf-8")
+
+        # All titles
+        titles = project.get("titles", [])
+        if titles:
+            critiques = project.get("title_critiques", {})
+            lines = []
+            for i, t in enumerate(titles, 1):
+                score = critiques.get(t, {}).get("score", "—")
+                lines.append(f"{i}. [{score}/100] {t}")
+            (wd / "titles.txt").write_text("\n".join(lines), encoding="utf-8")
+
+        # All descriptions
+        descriptions = project.get("descriptions", [])
+        if descriptions:
+            lines = []
+            variant_names = ["short", "medium", "full", "seo", "storytelling", "tutorial", "engagement", "minimal", "professional"]
+            for i, d in enumerate(descriptions):
+                name = variant_names[i] if i < len(variant_names) else f"variant_{i+1}"
+                lines.append(f"{'='*60}")
+                lines.append(f"ВАРИАНТ {i+1}: {name}")
+                lines.append(f"{'='*60}")
+                lines.append(d)
+                lines.append("")
+            (wd / "descriptions.txt").write_text("\n".join(lines), encoding="utf-8")
+
+        # Best title + best description + timestamps → ready-to-publish file
+        selected_title = project.get("selected_title")
+        best_desc = project.get("description")
+        if selected_title or best_desc:
+            parts = []
+            if selected_title:
+                parts.append(f"ЗАГОЛОВОК:\n{selected_title}")
+                parts.append("")
+            if best_desc:
+                parts.append(f"ОПИСАНИЕ:\n{best_desc}")
+                parts.append("")
+            if transcription:
+                # Extract timestamps from SRT
+                import re
+                timestamps = []
+                for match in re.finditer(r'(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->', transcription):
+                    ts = match.group(1)
+                    # Get subtitle text after the timestamp line
+                    pos = match.end()
+                    rest = transcription[pos:]
+                    text_match = re.search(r'\n(.+?)(?:\n\n|\Z)', rest, re.DOTALL)
+                    if text_match:
+                        text = text_match.group(1).strip().split('\n')[0][:80]
+                        # Convert HH:MM:SS to MM:SS
+                        h, m, s = ts.split(':')
+                        s = s.split(',')[0].split('.')[0]
+                        if int(h) > 0:
+                            short_ts = f"{int(h)}:{m}:{s}"
+                        else:
+                            short_ts = f"{int(m)}:{s}"
+                        timestamps.append(f"{short_ts} — {text}")
+                if timestamps:
+                    parts.append("ТАЙМКОДЫ:")
+                    # Deduplicate close timestamps, keep every ~30s
+                    parts.extend(timestamps[:50])
+            (wd / "ready_to_publish.txt").write_text("\n".join(parts), encoding="utf-8")
+
+        logger.info(f"Artifacts saved to {wd}")
+
     def _get_work_dir(self) -> Path:
         """Get the working directory for current project outputs."""
         wd = self.project.get("work_dir")
@@ -689,18 +898,43 @@ class MainWindow(ctk.CTk):
 
     def _play_file(self, filepath: str):
         """Open file in embedded media player."""
+        if not filepath or not Path(filepath).exists():
+            self._show_toast("Файл не найден", level="error")
+            return
         try:
             from .media_player import play_media
         except ImportError:
             try:
                 from ui.media_player import play_media
             except ImportError:
-                self._show_toast("Media player not available", level="error")
+                self._show_toast("Медиаплеер недоступен", level="error")
                 return
         play_media(self, filepath)
 
     def _update_status(self, message: str):
         self.topbar_status.configure(text=message, text_color=C["text3"])
+
+    def _on_pre_thumb_step_done(self):
+        """Called when titles or descriptions finish. Launches thumbnails when both are done."""
+        with self._pre_thumb_lock:
+            self._pre_thumb_done += 1
+            if self._pre_thumb_done >= 2:
+                self._pre_thumb_done = 0
+                self._ui_call(lambda: self.after(500, self._auto_generate_thumbnails))
+
+    def _poll_ui_queue(self):
+        """Process pending UI updates from background threads."""
+        try:
+            while True:
+                fn = self._ui_queue.get_nowait()
+                fn()
+        except queue.Empty:
+            pass
+        self.after(50, self._poll_ui_queue)
+
+    def _ui_call(self, fn):
+        """Schedule a function to run on the main thread via queue (thread-safe)."""
+        self._ui_queue.put(fn)
 
     def _set_status_working(self, message: str):
         self.topbar_status.configure(text=message, text_color=C["orange"])
@@ -719,7 +953,7 @@ class MainWindow(ctk.CTk):
 
     def _show_import_panel(self):
         self._clear_content()
-        self._set_active_step("import", "Import Video")
+        self._set_active_step("import", "Импорт видео")
         self._update_status(L["select_video_start"])
 
         wrapper = ctk.CTkFrame(self.content_frame, fg_color="transparent")
@@ -777,7 +1011,7 @@ class MainWindow(ctk.CTk):
         scroller = ctk.CTkScrollableFrame(self.content_frame, fg_color="transparent")
         scroller.pack(fill="both", expand=True, padx=24, pady=24)
 
-        # ── 1. File pickers (Intro / Outro / Overlay) ──
+        # ── 1. File pickers (Intro / Outro / Overlay) — drop-zone cards ──
         files_card = self._make_card(scroller)
         files_card.pack(fill="x", pady=(0, 16))
 
@@ -785,45 +1019,184 @@ class MainWindow(ctk.CTk):
         files_inner.pack(fill="x", padx=24, pady=16)
 
         ctk.CTkLabel(
-            files_inner, text="Video Assembly",
+            files_inner, text=L["video_assembly"],
             font=ctk.CTkFont(size=16, weight="bold"), text_color=C["text"],
         ).pack(anchor="w")
         ctk.CTkLabel(
-            files_inner, text="Choose intro, outro and subscribe overlay, then hit Render",
+            files_inner, text=L["assembly_hint"],
             font=ctk.CTkFont(size=12), text_color=C["text3"],
-        ).pack(anchor="w", pady=(2, 12))
+        ).pack(anchor="w", pady=(2, 16))
 
-        for label_text, key, picker_cmd, clear_cmd in [
-            ("Intro",              "intro_path",              self._pick_intro,              lambda: self._set_intro(None)),
-            ("Outro",              "outro_path",              self._pick_outro,              lambda: self._set_outro(None)),
-            ("Subscribe Overlay",  "subscribe_overlay_path",  self._pick_subscribe_overlay,  lambda: self._clear_subscribe_overlay()),
-        ]:
-            row = ctk.CTkFrame(files_inner, fg_color="transparent")
-            row.pack(fill="x", pady=3)
-            ctk.CTkLabel(row, text=f"{label_text}:", font=ctk.CTkFont(size=12), text_color=C["text2"], width=140, anchor="w").pack(side="left")
+        # Three drop-zone cards in a row
+        zones_row = ctk.CTkFrame(files_inner, fg_color="transparent")
+        zones_row.pack(fill="x")
+        zones_row.columnconfigure((0, 1, 2), weight=1, uniform="zone")
 
+        _zone_icons = {"intro_path": "▶", "outro_path": "⏹", "subscribe_overlay_path": "🔔"}
+        for col_idx, (label_text, key, picker_cmd, clear_cmd) in enumerate([
+            (L["intro"],              "intro_path",              self._pick_intro,              lambda: self._set_intro(None)),
+            (L["outro"],              "outro_path",              self._pick_outro,              lambda: self._set_outro(None)),
+            (L["subscribe_overlay"],  "subscribe_overlay_path",  self._pick_subscribe_overlay,  lambda: self._clear_subscribe_overlay()),
+        ]):
             val = self.project.get(key)
-            name = Path(val).name if val else "Not set"
-            color = C["text"] if val else C["text3"]
-            ctk.CTkLabel(row, text=name, font=ctk.CTkFont(size=12), text_color=color).pack(side="left", padx=8, fill="x", expand=True)
+            is_set = bool(val)
+            border_color = C["accent"] if is_set else C["border"]
+            zone_bg = C["accent_dim"] if is_set else C["surface2"]
 
-            ctk.CTkButton(row, text="Choose", width=70, height=28, font=ctk.CTkFont(size=11),
-                           fg_color=C["surface3"], command=picker_cmd).pack(side="right", padx=2)
-            if val:
-                ctk.CTkButton(row, text="Clear", width=50, height=28, font=ctk.CTkFont(size=11),
-                               fg_color=C["surface3"], command=clear_cmd).pack(side="right")
+            zone = ctk.CTkFrame(zones_row, fg_color=zone_bg, corner_radius=12, border_width=2, border_color=border_color)
+            zone.grid(row=0, column=col_idx, sticky="nsew", padx=6, pady=4, ipady=8)
 
-        # Overlay timing (only if overlay is set)
+            zone_inner = ctk.CTkFrame(zone, fg_color="transparent")
+            zone_inner.pack(expand=True, fill="both", padx=16, pady=12)
+
+            # Icon
+            ctk.CTkLabel(
+                zone_inner, text=_zone_icons[key],
+                font=ctk.CTkFont(size=24), text_color=C["accent"] if is_set else C["text3"],
+            ).pack(pady=(0, 4))
+
+            # Label
+            ctk.CTkLabel(
+                zone_inner, text=label_text,
+                font=ctk.CTkFont(size=13, weight="bold"), text_color=C["text"],
+            ).pack()
+
+            if is_set:
+                # Show filename
+                ctk.CTkLabel(
+                    zone_inner, text=Path(val).name,
+                    font=ctk.CTkFont(size=11), text_color=C["accent"],
+                    wraplength=180,
+                ).pack(pady=(4, 8))
+                # Buttons row
+                btn_row = ctk.CTkFrame(zone_inner, fg_color="transparent")
+                btn_row.pack()
+                ctk.CTkButton(
+                    btn_row, text=L["choose"], width=70, height=28,
+                    font=ctk.CTkFont(size=11), corner_radius=6,
+                    fg_color=C["surface3"], hover_color=C["border"], command=picker_cmd,
+                ).pack(side="left", padx=2)
+                ctk.CTkButton(
+                    btn_row, text=L["clear"], width=56, height=28,
+                    font=ctk.CTkFont(size=11), corner_radius=6,
+                    fg_color=C["surface3"], hover_color=C["red"], text_color=C["red"], command=clear_cmd,
+                ).pack(side="left", padx=2)
+            else:
+                # Drop hint
+                ctk.CTkLabel(
+                    zone_inner, text="Перетащите файл сюда\nили нажмите кнопку",
+                    font=ctk.CTkFont(size=11), text_color=C["text3"], justify="center",
+                ).pack(pady=(4, 8))
+                ctk.CTkButton(
+                    zone_inner, text=L["choose"], width=100, height=30,
+                    font=ctk.CTkFont(size=12), corner_radius=8,
+                    fg_color=C["accent"], hover_color=C["accent_hover"], text_color=C["text"],
+                    command=picker_cmd,
+                ).pack()
+
+            # Register drag-and-drop on zone
+            if HAS_DND:
+                try:
+                    zone.drop_target_register(DND_FILES)
+                    zone.dnd_bind("<<Drop>>", lambda e, k=key: self._on_drop_assembly_file(e, k))
+                except Exception:
+                    pass
+
+        # Overlay settings (only if overlay is set)
         if self.project.get("subscribe_overlay_path"):
-            ovl_opts = ctk.CTkFrame(files_inner, fg_color="transparent")
-            ovl_opts.pack(fill="x", pady=(8, 0))
-            ctk.CTkLabel(ovl_opts, text="Overlay start (sec):", font=ctk.CTkFont(size=11), text_color=C["text3"]).pack(side="left")
-            self._ovl_start = ctk.CTkEntry(ovl_opts, width=70, placeholder_text="60")
-            self._ovl_start.pack(side="left", padx=6)
-            ctk.CTkLabel(ovl_opts, text="Position:", font=ctk.CTkFont(size=11), text_color=C["text3"]).pack(side="left", padx=(12, 0))
-            self._ovl_position = ctk.CTkOptionMenu(ovl_opts, values=["bottom-left", "bottom-right", "top-left", "top-right"], width=120, font=ctk.CTkFont(size=11))
-            self._ovl_position.set("bottom-left")
-            self._ovl_position.pack(side="left", padx=6)
+            ovl_card = self._make_card(files_inner)
+            ovl_card.pack(fill="x", pady=(16, 0))
+            ovl_inner = ctk.CTkFrame(ovl_card, fg_color="transparent")
+            ovl_inner.pack(fill="x", padx=20, pady=16)
+
+            ctk.CTkLabel(
+                ovl_inner, text="Настройки оверлея подписки",
+                font=ctk.CTkFont(size=14, weight="bold"), text_color=C["text"],
+            ).pack(anchor="w", pady=(0, 12))
+
+            ovl_row = ctk.CTkFrame(ovl_inner, fg_color="transparent")
+            ovl_row.pack(fill="x")
+
+            # Left column: timing + scale
+            left_col = ctk.CTkFrame(ovl_row, fg_color="transparent")
+            left_col.pack(side="left", fill="y", padx=(0, 24))
+
+            # Timing
+            t_row = ctk.CTkFrame(left_col, fg_color="transparent")
+            t_row.pack(fill="x", pady=(0, 10))
+            ctk.CTkLabel(t_row, text="Начало (сек):", font=ctk.CTkFont(size=12), text_color=C["text2"]).pack(side="left")
+            self._ovl_start = ctk.CTkEntry(t_row, width=80, placeholder_text="60", font=ctk.CTkFont(size=12))
+            self._ovl_start.pack(side="left", padx=8)
+
+            # Scale
+            s_row = ctk.CTkFrame(left_col, fg_color="transparent")
+            s_row.pack(fill="x", pady=(0, 10))
+            ctk.CTkLabel(s_row, text="Масштаб:", font=ctk.CTkFont(size=12), text_color=C["text2"]).pack(side="left")
+            self._ovl_scale_var = ctk.StringVar(value=str(self.project.get("overlay_scale", 100)))
+            self._ovl_scale = ctk.CTkSlider(
+                s_row, from_=20, to=200, width=140,
+                fg_color=C["surface3"], progress_color=C["accent"],
+                button_color=C["accent"], button_hover_color=C["accent_hover"],
+                command=lambda v: self._ovl_scale_var.set(f"{int(v)}"),
+            )
+            self._ovl_scale.set(int(self.project.get("overlay_scale", 100)))
+            self._ovl_scale.pack(side="left", padx=8)
+            self._ovl_scale_label = ctk.CTkLabel(s_row, textvariable=self._ovl_scale_var, font=ctk.CTkFont(size=12), text_color=C["text"], width=35)
+            self._ovl_scale_label.pack(side="left")
+            ctk.CTkLabel(s_row, text="%", font=ctk.CTkFont(size=12), text_color=C["text3"]).pack(side="left")
+
+            # Right column: 3x3 position grid
+            right_col = ctk.CTkFrame(ovl_row, fg_color="transparent")
+            right_col.pack(side="left")
+
+            ctk.CTkLabel(right_col, text="Позиция:", font=ctk.CTkFont(size=12), text_color=C["text2"]).pack(anchor="w", pady=(0, 6))
+
+            saved_pos = self.project.get("overlay_position", "bottom-left")
+            self._ovl_position_var = ctk.StringVar(value=saved_pos)
+
+            grid_frame = ctk.CTkFrame(right_col, fg_color=C["surface2"], corner_radius=8)
+            grid_frame.pack()
+
+            _pos_labels = {
+                "top-left": "↖", "top-center": "↑", "top-right": "↗",
+                "center-left": "←", "center": "●", "center-right": "→",
+                "bottom-left": "↙", "bottom-center": "↓", "bottom-right": "↘",
+            }
+            _pos_grid = [
+                ["top-left", "top-center", "top-right"],
+                ["center-left", "center", "center-right"],
+                ["bottom-left", "bottom-center", "bottom-right"],
+            ]
+            self._ovl_pos_btns = {}
+            for r, row_keys in enumerate(_pos_grid):
+                for c_idx, pos_key in enumerate(row_keys):
+                    is_active = pos_key == saved_pos
+                    btn = ctk.CTkButton(
+                        grid_frame, text=_pos_labels[pos_key],
+                        width=38, height=38, corner_radius=4,
+                        font=ctk.CTkFont(size=16),
+                        fg_color=C["accent"] if is_active else C["surface3"],
+                        hover_color=C["accent_hover"],
+                        text_color=C["text"] if is_active else C["text3"],
+                        command=lambda pk=pos_key: self._set_ovl_position(pk),
+                    )
+                    btn.grid(row=r, column=c_idx, padx=2, pady=2)
+                    self._ovl_pos_btns[pos_key] = btn
+
+            # Hidden OptionMenu for compatibility with render code
+            self._ovl_position = ctk.CTkOptionMenu(ovl_inner, values=list(_pos_labels.keys()), width=1, height=1)
+            self._ovl_position.set(saved_pos)
+            # Don't pack — invisible, just holds the value
+
+            # Preview button
+            preview_btn_row = ctk.CTkFrame(ovl_inner, fg_color="transparent")
+            preview_btn_row.pack(fill="x", pady=(12, 0))
+            ctk.CTkButton(
+                preview_btn_row, text="👁  Предпросмотр позиции",
+                font=ctk.CTkFont(size=12), height=32, corner_radius=8,
+                fg_color=C["surface3"], hover_color=C["border"], text_color=C["text2"],
+                command=self._preview_overlay_position,
+            ).pack(side="left")
 
         # ── 2. Preview thumbnails ──
         has_extras = self.project.get("intro_path") or self.project.get("outro_path")
@@ -877,44 +1250,92 @@ class MainWindow(ctk.CTk):
                 except Exception:
                     pass
 
-        # ── 3. Render button (always visible) ──
+        # ── 3. Render & Result ──
         render_card = self._make_card(scroller)
         render_card.pack(fill="x", pady=(0, 16))
 
         render_inner = ctk.CTkFrame(render_card, fg_color="transparent")
         render_inner.pack(fill="x", padx=24, pady=16)
 
-        # Play result if already assembled
         assembled = "_assembled" in str(self.project.get("video_path", "")) or "_final" in str(self.project.get("video_path", ""))
+
         if assembled:
-            play_row = ctk.CTkFrame(render_inner, fg_color="transparent")
-            play_row.pack(fill="x", pady=(0, 12))
+            # ── Result ready block ──
+            result_header = ctk.CTkFrame(render_inner, fg_color="transparent")
+            result_header.pack(fill="x", pady=(0, 12))
+
+            ctk.CTkLabel(
+                result_header, text="✓",
+                font=ctk.CTkFont(size=20, weight="bold"), text_color=C["green"],
+            ).pack(side="left")
+            ctk.CTkLabel(
+                result_header, text="Видео собрано",
+                font=ctk.CTkFont(size=15, weight="bold"), text_color=C["green"],
+            ).pack(side="left", padx=(8, 0))
+
+            # File info card
+            result_file = ctk.CTkFrame(render_inner, fg_color=C["green_dim"], corner_radius=10, border_width=1, border_color=C["green"])
+            result_file.pack(fill="x", pady=(0, 12))
+            result_file_inner = ctk.CTkFrame(result_file, fg_color="transparent")
+            result_file_inner.pack(fill="x", padx=16, pady=12)
+
+            vpath = Path(self.project["video_path"])
+            ctk.CTkLabel(
+                result_file_inner, text=vpath.name,
+                font=ctk.CTkFont(size=13, weight="bold"), text_color=C["text"],
+            ).pack(anchor="w")
+            try:
+                size_mb = vpath.stat().st_size / (1024 * 1024)
+                ctk.CTkLabel(
+                    result_file_inner, text=f"{size_mb:.1f} МБ",
+                    font=ctk.CTkFont(size=11), text_color=C["text3"],
+                ).pack(anchor="w", pady=(2, 0))
+            except Exception:
+                pass
+
+            # Action buttons
+            result_btns = ctk.CTkFrame(render_inner, fg_color="transparent")
+            result_btns.pack(fill="x", pady=(0, 8))
 
             ctk.CTkButton(
-                play_row, text="Play Result",
+                result_btns, text="▶  Воспроизвести",
                 font=ctk.CTkFont(size=13, weight="bold"),
-                height=36, width=160, corner_radius=8,
-                fg_color=C["green"], hover_color="#00a884", text_color=C["text"],
+                height=40, width=180, corner_radius=10,
+                fg_color=C["green"], hover_color="#00a884", text_color="#ffffff",
                 command=lambda: self._play_file(self.project["video_path"]),
-            ).pack(side="left")
-            ctk.CTkLabel(play_row, text=Path(self.project["video_path"]).name, font=ctk.CTkFont(size=11), text_color=C["text3"]).pack(side="left", padx=12)
+            ).pack(side="left", padx=(0, 8))
+
+            if has_extras:
+                ctk.CTkButton(
+                    result_btns, text="⟳  Пересобрать",
+                    font=ctk.CTkFont(size=12),
+                    height=40, width=160, corner_radius=10,
+                    fg_color=C["surface3"], hover_color=C["border"], text_color=C["text2"],
+                    command=self._run_render_assembly,
+                ).pack(side="left")
+        else:
+            # ── Not yet assembled ──
+            ctk.CTkLabel(
+                render_inner, text="Результат",
+                font=ctk.CTkFont(size=15, weight="bold"), text_color=C["text"],
+            ).pack(anchor="w", pady=(0, 8))
 
         self._render_progress = ctk.CTkProgressBar(
-            render_inner, height=8, corner_radius=4,
-            fg_color=C["surface3"], progress_color=C["green"],
+            render_inner, height=6, corner_radius=3,
+            fg_color=C["surface3"], progress_color=C["accent"],
         )
         self._render_progress.pack(fill="x", pady=(0, 12))
         self._render_progress.set(0)
 
-        if has_extras:
+        if not assembled and has_extras:
             self._render_btn = self._make_action_btn(
-                render_inner, "Render Assembly",
+                render_inner, "Собрать видео",
                 self._run_render_assembly, width=300,
             )
             self._render_btn.pack(fill="x")
-        else:
+        elif not assembled and not has_extras:
             ctk.CTkLabel(
-                render_inner, text="Add Intro or Outro above to enable assembly",
+                render_inner, text=L["add_intro_outro"],
                 font=ctk.CTkFont(size=12), text_color=C["text3"],
             ).pack()
 
@@ -930,7 +1351,8 @@ class MainWindow(ctk.CTk):
         logger.info("Starting render assembly pipeline")
         self._mark_step_working("edit")
         self._set_status_working("Rendering assembly...")
-        self._render_btn.configure(state="disabled", text="Rendering...")
+        if hasattr(self, "_render_btn") and self._render_btn.winfo_exists():
+            self._render_btn.configure(state="disabled", text="Rendering...")
         self._render_progress.set(0.05)
 
         def render():
@@ -946,18 +1368,21 @@ class MainWindow(ctk.CTk):
                     videos.append(self.project["outro_path"])
 
                 if len(videos) <= 1:
-                    self.after(0, lambda: self._show_toast("Nothing to assemble — add intro or outro first.", level="warning"))
-                    self.after(0, lambda: self._render_btn.configure(state="normal", text="Render Assembly (Intro + Video + Outro)"))
+                    self._ui_call(lambda: self._show_toast("Нечего собирать — сначала добавь интро или аутро.", level="warning"))
+                    self._ui_call(lambda: self._render_btn.configure(state="normal", text="Собрать видео (Интро + Видео + Аутро)") if hasattr(self, "_render_btn") and self._render_btn.winfo_exists() else None)
                     return
 
                 # Step 1: Concat
-                self.after(0, lambda: self._set_status_working("Step 1/4: Concatenating videos..."))
-                self.after(0, lambda: self._render_progress.set(0.1))
+                self._ui_call(lambda: self._set_status_working("Шаг 1/4: Склейка видео..."))
+                self._ui_call(lambda: self._render_progress.set(0.1))
 
                 concat_result = self.video_processor.concat_videos(
                     videos,
                     output_name="merged_video",
-                    progress_callback=lambda pct, msg: self.after(0, lambda p=pct: self._render_progress.set(0.1 + p * 0.002)),
+                    progress_callback=lambda pct, msg: (
+                        self._ui_call(lambda p=pct: self._render_progress.set(0.1 + p * 0.002)),
+                        self._ui_call(lambda p=pct: self._set_status_working(f"Склейка видео... {p:.0f}%")),
+                    ),
                 )
                 logger.info(f"Concat done: {concat_result}")
                 current_video = concat_result
@@ -966,8 +1391,8 @@ class MainWindow(ctk.CTk):
                 overlay_path = self.project.get("subscribe_overlay_path")
                 ovl_start_sec = 120.0
                 if overlay_path and Path(overlay_path).exists():
-                    self.after(0, lambda: self._set_status_working("Step 2/4: Adding subscribe overlay..."))
-                    self.after(0, lambda: self._render_progress.set(0.35))
+                    self._ui_call(lambda: self._set_status_working("Шаг 2/4: Оверлей подписки..."))
+                    self._ui_call(lambda: self._render_progress.set(0.35))
 
                     try:
                         ovl_start_text = self._ovl_start.get() if hasattr(self, "_ovl_start") else "120"
@@ -977,6 +1402,9 @@ class MainWindow(ctk.CTk):
 
                     position = self._ovl_position.get() if hasattr(self, "_ovl_position") else "bottom-left"
 
+                    scale_pct = int(self._ovl_scale.get()) if hasattr(self, "_ovl_scale") else 100
+                    ovl_width = int(576 * scale_pct / 100)
+
                     if hasattr(self.video_processor, "apply_subscribe_overlay"):
                         current_video = self.video_processor.apply_subscribe_overlay(
                             base_video=current_video,
@@ -984,12 +1412,13 @@ class MainWindow(ctk.CTk):
                             output_name="with_overlay",
                             start_time=ovl_start_sec,
                             position=position,
+                            overlay_width=ovl_width,
                         )
                         logger.info(f"Overlay applied: {current_video}")
 
                 # Step 3: Restore original audio (avoid quality degradation)
-                self.after(0, lambda: self._set_status_working("Step 3/4: Restoring original audio..."))
-                self.after(0, lambda: self._render_progress.set(0.6))
+                self._ui_call(lambda: self._set_status_working("Шаг 3/4: Восстановление оригинального звука..."))
+                self._ui_call(lambda: self._render_progress.set(0.6))
 
                 if hasattr(self.video_processor, "restore_original_audio"):
                     sources = []
@@ -1006,8 +1435,8 @@ class MainWindow(ctk.CTk):
 
                 # Step 4: Mix overlay audio (if overlay was applied)
                 if overlay_path and Path(overlay_path).exists() and hasattr(self.video_processor, "mix_overlay_audio"):
-                    self.after(0, lambda: self._set_status_working("Step 4/4: Mixing overlay sound..."))
-                    self.after(0, lambda: self._render_progress.set(0.8))
+                    self._ui_call(lambda: self._set_status_working("Шаг 4/4: Микширование звука оверлея..."))
+                    self._ui_call(lambda: self._render_progress.set(0.8))
 
                     current_video = self.video_processor.mix_overlay_audio(
                         video_path=current_video,
@@ -1027,18 +1456,17 @@ class MainWindow(ctk.CTk):
                             f.unlink(missing_ok=True)
                             logger.info(f"Cleaned up: {f.name}")
 
-                self.after(0, lambda: self._render_progress.set(1.0))
-                self.after(0, lambda: self._mark_step_done("edit"))
-                self.after(0, lambda: self._set_status_done("Assembly complete!"))
-                self.after(0, lambda: self._show_toast("Video assembled! All 4 steps done.", level="success"))
-                self.after(0, lambda: self._render_btn.configure(state="normal", text="Render Assembly (Intro + Video + Outro)"))
-                self.after(0, self._show_edit_panel)
+                self._ui_call(lambda: self._render_progress.set(1.0))
+                self._ui_call(lambda: self._mark_step_done("edit"))
+                self._ui_call(lambda: self._set_status_done("Сборка завершена!"))
+                self._ui_call(lambda: self._show_toast("Видео собрано! Все 4 шага выполнены.", level="success"))
+                self._ui_call(self._show_edit_panel)
             except Exception as e:
                 error_msg = str(e)[:200]
-                self.after(0, lambda: self._mark_step_error("edit"))
-                self.after(0, lambda: self._set_status_error("Assembly failed"))
-                self.after(0, lambda: self._show_toast(f"Assembly failed: {error_msg}", level="error", duration=0))
-                self.after(0, lambda: self._render_btn.configure(state="normal", text="Render Assembly (Intro + Video + Outro)"))
+                self._ui_call(lambda: self._mark_step_error("edit"))
+                self._ui_call(lambda: self._set_status_error("Ошибка сборки"))
+                self._ui_call(lambda: self._show_toast(f"Ошибка сборки: {error_msg}", level="error", duration=0))
+                self._ui_call(self._show_edit_panel)
 
         threading.Thread(target=render, daemon=True).start()
 
@@ -1102,7 +1530,7 @@ class MainWindow(ctk.CTk):
         self._transcribe_progress.pack(fill="x", pady=(0, 12))
         self._transcribe_progress.set(0)
 
-        self._transcribe_btn = self._make_action_btn(card_inner, "Start Transcription", self._run_transcription, width=200)
+        self._transcribe_btn = self._make_action_btn(card_inner, "Начать транскрипцию", self._run_transcription, width=200)
         self._transcribe_btn.pack(anchor="w")
 
         # Result card
@@ -1110,7 +1538,7 @@ class MainWindow(ctk.CTk):
             res_card = self._make_card(scroller)
             res_card.pack(fill="both", expand=True)
 
-            self._make_section_title(res_card, "Transcription Result")
+            self._make_section_title(res_card, "Результат транскрипции")
 
             txt = ctk.CTkTextbox(
                 res_card, font=ctk.CTkFont(size=13),
@@ -1129,7 +1557,7 @@ class MainWindow(ctk.CTk):
         if not self._check_deps("audio"):
             return
         self._clear_content()
-        self._set_active_step("audio", "Clean Audio")
+        self._set_active_step("audio", "Очистить звук")
         self._update_status(L["ready"])
 
         scroller = ctk.CTkScrollableFrame(self.content_frame, fg_color="transparent")
@@ -1142,11 +1570,11 @@ class MainWindow(ctk.CTk):
         inner.pack(fill="x", padx=24, pady=20)
 
         ctk.CTkLabel(
-            inner, text="AI Audio Cleanup",
+            inner, text=L["audio_cleanup"],
             font=ctk.CTkFont(size=16, weight="bold"), text_color=C["text"],
         ).pack(anchor="w")
         ctk.CTkLabel(
-            inner, text="Remove noise and enhance audio quality",
+            inner, text=L["remove_noise"],
             font=ctk.CTkFont(size=12), text_color=C["text3"],
         ).pack(anchor="w", pady=(4, 16))
 
@@ -1155,18 +1583,18 @@ class MainWindow(ctk.CTk):
         mode_frame.pack(fill="x", pady=(0, 12))
 
         ctk.CTkLabel(
-            mode_frame, text="Mode:",
+            mode_frame, text=L["mode"],
             font=ctk.CTkFont(size=13), text_color=C["text2"],
         ).pack(side="left", padx=(0, 12))
 
         self._audio_mode = ctk.StringVar(value="builtin")
         ctk.CTkRadioButton(
-            mode_frame, text="Built-in (FFmpeg)", variable=self._audio_mode,
+            mode_frame, text=L["builtin_ffmpeg"], variable=self._audio_mode,
             value="builtin", font=ctk.CTkFont(size=12),
             fg_color=C["accent"], text_color=C["text"],
         ).pack(side="left", padx=(0, 16))
         ctk.CTkRadioButton(
-            mode_frame, text="Auphonic (cloud)", variable=self._audio_mode,
+            mode_frame, text=L["auphonic_cloud"], variable=self._audio_mode,
             value="auphonic", font=ctk.CTkFont(size=12),
             fg_color=C["accent"], text_color=C["text"],
         ).pack(side="left")
@@ -1176,7 +1604,7 @@ class MainWindow(ctk.CTk):
         preset_frame.pack(fill="x", pady=(0, 16))
 
         ctk.CTkLabel(
-            preset_frame, text="Preset:",
+            preset_frame, text=L["preset"],
             font=ctk.CTkFont(size=13), text_color=C["text2"],
         ).pack(side="left", padx=(0, 12))
 
@@ -1195,7 +1623,7 @@ class MainWindow(ctk.CTk):
         self._audio_progress.pack(fill="x", pady=(0, 12))
         self._audio_progress.set(0)
 
-        self._audio_btn = self._make_action_btn(inner, "Clean Audio", self._run_audio_cleanup, width=200)
+        self._audio_btn = self._make_action_btn(inner, "Очистить звук", self._run_audio_cleanup, width=200)
         self._audio_btn.pack(anchor="w")
 
         # Result preview (if cleaned audio exists)
@@ -1220,7 +1648,7 @@ class MainWindow(ctk.CTk):
             play_row.pack(fill="x")
 
             ctk.CTkButton(
-                play_row, text="Play Cleaned",
+                play_row, text=L["play_cleaned"],
                 font=ctk.CTkFont(size=13, weight="bold"),
                 height=36, width=160, corner_radius=8,
                 fg_color=C["green"], hover_color="#00a884",
@@ -1229,7 +1657,7 @@ class MainWindow(ctk.CTk):
             ).pack(side="left")
 
             ctk.CTkButton(
-                play_row, text="Play Original",
+                play_row, text=L["play_original"],
                 font=ctk.CTkFont(size=12),
                 height=36, width=140, corner_radius=8,
                 fg_color=C["surface3"], hover_color=C["border"],
@@ -1238,7 +1666,7 @@ class MainWindow(ctk.CTk):
             ).pack(side="left", padx=8)
 
             ctk.CTkButton(
-                play_row, text="Stop",
+                play_row, text=L["stop"],
                 font=ctk.CTkFont(size=12),
                 height=36, width=70, corner_radius=8,
                 fg_color=C["red"], hover_color="#cc5555",
@@ -1250,7 +1678,7 @@ class MainWindow(ctk.CTk):
             use_cleaned = self.project.get("use_cleaned_audio", True)
             self._use_cleaned_var = ctk.BooleanVar(value=use_cleaned)
             ctk.CTkCheckBox(
-                result_inner, text="Use cleaned audio in final render",
+                result_inner, text=L["use_cleaned"],
                 variable=self._use_cleaned_var,
                 font=ctk.CTkFont(size=12),
                 fg_color=C["green"], text_color=C["text"],
@@ -1265,11 +1693,11 @@ class MainWindow(ctk.CTk):
         if not self._check_deps("titles"):
             return
         self._clear_content()
-        self._set_active_step("titles", "Generate Titles")
+        self._set_active_step("titles", "Сгенерировать заголовки")
 
         # Check if transcription is ready
         if not self.project.get("transcription") and "transcribe" not in self.completed_steps:
-            self._update_status("Waiting for transcription...")
+            self._update_status(L["transcription_in_progress"])
             wrapper = ctk.CTkFrame(self.content_frame, fg_color="transparent")
             wrapper.pack(expand=True)
             ctk.CTkLabel(
@@ -1277,7 +1705,7 @@ class MainWindow(ctk.CTk):
                 font=ctk.CTkFont(size=16), text_color=C["orange"],
             ).pack(pady=(0, 8))
             ctk.CTkLabel(
-                wrapper, text="Titles will be generated based on transcription.\nPlease wait or go to step 03 to check progress.",
+                wrapper, text=L["wait_transcription_titles"],
                 font=ctk.CTkFont(size=12), text_color=C["text3"], justify="center",
             ).pack()
             # Auto-refresh in 3 seconds
@@ -1297,28 +1725,28 @@ class MainWindow(ctk.CTk):
         card_inner.pack(fill="x", padx=24, pady=20)
 
         ctk.CTkLabel(
-            card_inner, text="AI Title Generator",
+            card_inner, text=L["title_generator"],
             font=ctk.CTkFont(size=16, weight="bold"), text_color=C["text"],
         ).pack(anchor="w")
         ctk.CTkLabel(
-            card_inner, text="Generate engaging titles based on transcription",
+            card_inner, text=L["generate_titles_hint"],
             font=ctk.CTkFont(size=12), text_color=C["text3"],
         ).pack(anchor="w", pady=(4, 8))
 
         # Custom prompt input
-        ctk.CTkLabel(card_inner, text="Additional context (optional):", font=ctk.CTkFont(size=11), text_color=C["text3"]).pack(anchor="w")
+        ctk.CTkLabel(card_inner, text=L["additional_context"], font=ctk.CTkFont(size=11), text_color=C["text3"]).pack(anchor="w")
         self._titles_custom_prompt = ctk.CTkTextbox(
             card_inner, height=50, font=ctk.CTkFont(size=12),
             fg_color=C["surface2"], corner_radius=6, text_color=C["text"],
         )
         self._titles_custom_prompt.pack(fill="x", pady=(4, 12))
 
-        self._titles_btn = self._make_action_btn(card_inner, "Generate Titles + Critique", self._run_title_generation, width=240)
+        self._titles_btn = self._make_action_btn(card_inner, L["generate_titles"], self._run_title_generation, width=240)
         self._titles_btn.pack(anchor="w")
 
         # Generated titles
         if self.project["titles"]:
-            self._make_section_title(scroller, "Choose a title")
+            self._make_section_title(scroller, L["choose_title"])
             for i, title_text in enumerate(self.project["titles"], 1):
                 row = self._make_card(scroller)
                 row.pack(fill="x", pady=3)
@@ -1365,7 +1793,7 @@ class MainWindow(ctk.CTk):
             critique_frame.pack(fill="x", pady=(8, 0))
 
             self._critique_btn = self._make_action_btn(
-                critique_frame, "Critique All Titles", self._run_title_critique, accent=False, width=200
+                critique_frame, "Оценить все заголовки", self._run_title_critique, accent=False, width=200
             )
             self._critique_btn.pack(side="left")
 
@@ -1379,13 +1807,13 @@ class MainWindow(ctk.CTk):
                 detail_inner.pack(fill="x", padx=20, pady=16)
 
                 scores_text = (
-                    f"Overall: {crit.get('score', '?')}/100  |  "
-                    f"SEO: {crit.get('seo_score', '?')}/100  |  "
-                    f"Engagement: {crit.get('engagement_score', '?')}/100"
+                    f"{L['overall']}: {crit.get('score', '?')}/100  |  "
+                    f"{L['seo']}: {crit.get('seo_score', '?')}/100  |  "
+                    f"{L['engagement']}: {crit.get('engagement_score', '?')}/100"
                 )
                 ctk.CTkLabel(detail_inner, text=scores_text, font=ctk.CTkFont(size=12, weight="bold"), text_color=C["text"]).pack(anchor="w")
 
-                for label, key, color in [("Strengths", "strengths", C["green"]), ("Weaknesses", "weaknesses", C["red"]), ("Suggestions", "suggestions", C["blue"])]:
+                for label, key, color in [(L["strengths"], "strengths", C["green"]), (L["weaknesses"], "weaknesses", C["red"]), (L["suggestions"], "suggestions", C["blue"])]:
                     items = crit.get(key, [])
                     if items:
                         ctk.CTkLabel(detail_inner, text=f"{label}:", font=ctk.CTkFont(size=11, weight="bold"), text_color=color).pack(anchor="w", pady=(8, 2))
@@ -1400,15 +1828,15 @@ class MainWindow(ctk.CTk):
         if not self._check_deps("thumbnail"):
             return
         self._clear_content()
-        self._set_active_step("thumbnail", "Create Thumbnail")
+        self._set_active_step("thumbnail", "Обложки")
 
         # Wait for transcription if not done
         if not self.project.get("transcription") and "transcribe" not in self.completed_steps:
-            self._update_status("Waiting for transcription...")
+            self._update_status(L["transcription_in_progress"])
             wrapper = ctk.CTkFrame(self.content_frame, fg_color="transparent")
             wrapper.pack(expand=True)
             ctk.CTkLabel(wrapper, text=L["transcription_in_progress"], font=ctk.CTkFont(size=16), text_color=C["orange"]).pack(pady=(0, 8))
-            ctk.CTkLabel(wrapper, text="Thumbnails will use transcription for better prompts.\nPlease wait.", font=ctk.CTkFont(size=12), text_color=C["text3"], justify="center").pack()
+            ctk.CTkLabel(wrapper, text=L["wait_transcription_thumbs"], font=ctk.CTkFont(size=12), text_color=C["text3"], justify="center").pack()
             self.after(3000, lambda: self._show_thumbnail_panel() if self.active_step == "thumbnail" else None)
             return
 
@@ -1425,13 +1853,13 @@ class MainWindow(ctk.CTk):
         inner.pack(fill="x", padx=24, pady=20)
 
         ctk.CTkLabel(
-            inner, text="Thumbnail Generator",
+            inner, text="Генератор обложек",
             font=ctk.CTkFont(size=16, weight="bold"), text_color=C["text"],
         ).pack(anchor="w")
 
         title_text = self.project.get("selected_title") or ""
         ctk.CTkLabel(
-            inner, text=f'Title: "{title_text[:60]}"',
+            inner, text=f'Заголовок: "{title_text[:60]}"',
             font=ctk.CTkFont(size=12), text_color=C["text3"], wraplength=500,
         ).pack(anchor="w", pady=(4, 12))
 
@@ -1443,7 +1871,7 @@ class MainWindow(ctk.CTk):
         self._thumb_progress.set(0)
 
         # Custom prompt
-        ctk.CTkLabel(inner, text="Additional prompt (optional):", font=ctk.CTkFont(size=11), text_color=C["text3"]).pack(anchor="w")
+        ctk.CTkLabel(inner, text="Дополнительный промпт (опционально):", font=ctk.CTkFont(size=11), text_color=C["text3"]).pack(anchor="w")
         self._thumb_custom_prompt = ctk.CTkTextbox(
             inner, height=40, font=ctk.CTkFont(size=12),
             fg_color=C["surface2"], corner_radius=6, text_color=C["text"],
@@ -1453,61 +1881,127 @@ class MainWindow(ctk.CTk):
         # Reference image picker
         ref_row = ctk.CTkFrame(inner, fg_color="transparent")
         ref_row.pack(fill="x", pady=(0, 12))
-        ctk.CTkLabel(ref_row, text="Reference image:", font=ctk.CTkFont(size=11), text_color=C["text3"]).pack(side="left")
+        ctk.CTkLabel(ref_row, text="Референс:", font=ctk.CTkFont(size=11), text_color=C["text3"]).pack(side="left")
         self._thumb_ref_label = ctk.CTkLabel(
             ref_row, text=Path(self.project.get("reference_image", "") or "").name or "None",
             font=ctk.CTkFont(size=11), text_color=C["text2"],
         )
         self._thumb_ref_label.pack(side="left", padx=8)
         ctk.CTkButton(
-            ref_row, text="Choose", width=60, height=26, font=ctk.CTkFont(size=11),
+            ref_row, text="Выбрать", width=70, height=26, font=ctk.CTkFont(size=11),
             fg_color=C["surface3"], command=self._pick_reference_image,
         ).pack(side="left", padx=2)
         ctk.CTkButton(
-            ref_row, text="Clear", width=50, height=26, font=ctk.CTkFont(size=11),
+            ref_row, text="Сброс", width=55, height=26, font=ctk.CTkFont(size=11),
             fg_color=C["surface3"], command=lambda: self._set_reference_image(None),
         ).pack(side="left")
 
-        self._thumb_btn = self._make_action_btn(inner, "Generate 3 Thumbnails", self._run_thumbnail_generation, width=240)
+        self._thumb_btn = self._make_action_btn(inner, "Сгенерировать 9 обложек", self._run_thumbnail_generation, width=240)
         self._thumb_btn.pack(anchor="w")
 
-        # Gallery of existing thumbnails
+        # Gallery of existing thumbnails (grid 3 columns)
         thumb_paths = self.project.get("thumbnail_paths", [])
         if thumb_paths and HAS_PIL:
-            self._make_section_title(scroller, "Choose a thumbnail")
+            self._make_section_title(scroller, "Выбери обложку")
             gallery = ctk.CTkFrame(scroller, fg_color="transparent")
             gallery.pack(fill="x", pady=(0, 16))
+
+            # Configure 3-column grid
+            for c in range(3):
+                gallery.columnconfigure(c, weight=1, uniform="thumb")
 
             for i, tp in enumerate(thumb_paths):
                 if not Path(tp).exists():
                     continue
+                row_idx = i // 3
+                col_idx = i % 3
+
                 col = self._make_card(gallery)
-                col.pack(side="left", padx=6, expand=True, fill="x")
+                col.grid(row=row_idx, column=col_idx, padx=6, pady=6, sticky="nsew")
 
                 try:
                     pil_img = PILImage.open(tp)
-                    pil_img.thumbnail((320, 180))
-                    ctk_img = CTkImage(pil_img, size=(320, 180))
-                    img_label = ctk.CTkLabel(col, image=ctk_img, text="")
+                    pil_img.thumbnail((380, 214))
+                    ctk_img = CTkImage(pil_img, size=(380, 214))
+                    img_label = ctk.CTkLabel(col, image=ctk_img, text="", cursor="hand2")
                     img_label.pack(padx=8, pady=(8, 4))
+                    # Click to preview full size
+                    img_label.bind("<Button-1>", lambda e, p=tp: self._preview_thumbnail(p))
                 except Exception:
-                    ctk.CTkLabel(col, text=f"Thumbnail {i+1}", text_color=C["text3"]).pack(padx=8, pady=8)
+                    ctk.CTkLabel(col, text=f"Обложка {i+1}", text_color=C["text3"]).pack(padx=8, pady=8)
+
+                # Style name
+                styles = ["modern", "cinematic", "vibrant", "professional", "creative", "dark", "bright", "tech", "cozy"]
+                style_name = styles[i] if i < len(styles) else f"#{i+1}"
+                ctk.CTkLabel(col, text=style_name, font=ctk.CTkFont(size=11), text_color=C["text3"]).pack()
 
                 is_selected = (self.project.get("thumbnail_path") == tp)
-                btn_text = "Selected" if is_selected else f"Use #{i+1}"
+                btn_text = "✓ Выбрана" if is_selected else f"Выбрать"
                 btn_color = C["green"] if is_selected else C["accent"]
                 ctk.CTkButton(
                     col, text=btn_text, height=30, font=ctk.CTkFont(size=11),
                     fg_color=btn_color, text_color=C["text"],
                     command=lambda p=tp: self._select_thumbnail(p),
-                ).pack(padx=8, pady=(0, 8))
+                ).pack(padx=8, pady=(4, 8))
 
         self._make_step_footer(scroller, "thumbnail")
+
+    def _preview_thumbnail(self, path: str):
+        """Show full-size thumbnail preview in a modal overlay."""
+        if not HAS_PIL or not Path(path).exists():
+            return
+
+        overlay = ctk.CTkToplevel(self)
+        overlay.title("Просмотр обложки")
+        overlay.configure(fg_color=C["bg"])
+        overlay.transient(self)
+        overlay.grab_set()
+
+        # Load full-size image, fit to screen
+        pil_img = PILImage.open(path)
+        # Scale to fit ~80% of screen
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        max_w = int(sw * 0.8)
+        max_h = int(sh * 0.8)
+        img_w, img_h = pil_img.size
+        scale = min(max_w / img_w, max_h / img_h, 1.0)
+        disp_w = int(img_w * scale)
+        disp_h = int(img_h * scale)
+
+        overlay.geometry(f"{disp_w + 40}x{disp_h + 100}")
+
+        ctk_img = CTkImage(pil_img, size=(disp_w, disp_h))
+        img_label = ctk.CTkLabel(overlay, image=ctk_img, text="")
+        img_label.pack(padx=20, pady=(20, 10))
+        # Keep reference to prevent GC
+        overlay._preview_img = ctk_img
+
+        btn_row = ctk.CTkFrame(overlay, fg_color="transparent")
+        btn_row.pack(pady=(0, 16))
+
+        ctk.CTkButton(
+            btn_row, text="Выбрать эту обложку", height=36,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=C["green"], hover_color="#00a884", text_color=C["text"],
+            command=lambda: (self._select_thumbnail(path), overlay.destroy()),
+        ).pack(side="left", padx=8)
+
+        ctk.CTkButton(
+            btn_row, text="Закрыть", height=36,
+            font=ctk.CTkFont(size=13),
+            fg_color=C["surface3"], text_color=C["text"],
+            command=overlay.destroy,
+        ).pack(side="left", padx=8)
+
+        # Click image or Escape to close
+        img_label.bind("<Button-1>", lambda e: overlay.destroy())
+        overlay.bind("<Escape>", lambda e: overlay.destroy())
 
     def _select_thumbnail(self, path: str):
         self.project["thumbnail_path"] = path
         self._mark_step_done("thumbnail")
-        self._set_status_done(f"Thumbnail selected: {Path(path).name}")
+        self._set_status_done(f"Обложка выбрана: {Path(path).name}")
         self._show_thumbnail_panel()
 
     def _pick_reference_image(self):
@@ -1613,8 +2107,8 @@ class MainWindow(ctk.CTk):
 
     def _show_preview_panel(self):
         self._clear_content()
-        self._set_active_step("preview", "Preview")
-        self._update_status("Preview your work")
+        self._set_active_step("preview", "Предпросмотр")
+        self._update_status("Финальный предпросмотр перед публикацией")
 
         if not self.project["video_path"]:
             wrapper = ctk.CTkFrame(self.content_frame, fg_color="transparent")
@@ -1625,22 +2119,136 @@ class MainWindow(ctk.CTk):
             ).pack()
             return
 
-        try:
-            from .preview_panel import PreviewPanel
-        except ImportError:
-            from ui.preview_panel import PreviewPanel
+        scroller = ctk.CTkScrollableFrame(self.content_frame, fg_color="transparent")
+        scroller.pack(fill="both", expand=True, padx=24, pady=24)
 
-        # Show assembled video if available, otherwise original
+        # Determine video to preview
         video_to_preview = self.project["video_path"]
         if self.project.get("intro_path") or self.project.get("outro_path"):
-            # Check if assembled version exists
             assembled = self._get_work_dir() / f"{Path(self.project['original_video_path'] or self.project['video_path']).stem}_assembled.mp4"
             if assembled.exists():
                 video_to_preview = str(assembled)
 
-        preview = PreviewPanel(self.content_frame, on_preview_error=lambda e: self._set_status_error(e))
-        preview.pack(fill="both", expand=True, padx=24, pady=24)
-        preview.load_video(Path(video_to_preview))
+        # ── Title ──
+        selected_title = self.project.get("selected_title")
+        if selected_title:
+            title_card = self._make_card(scroller)
+            title_card.pack(fill="x", pady=(0, 12))
+            title_inner = ctk.CTkFrame(title_card, fg_color="transparent")
+            title_inner.pack(fill="x", padx=24, pady=16)
+
+            ctk.CTkLabel(
+                title_inner, text="Заголовок",
+                font=ctk.CTkFont(size=12), text_color=C["text3"],
+            ).pack(anchor="w")
+            ctk.CTkLabel(
+                title_inner, text=selected_title,
+                font=ctk.CTkFont(size=20, weight="bold"), text_color=C["text"],
+                wraplength=800,
+            ).pack(anchor="w", pady=(4, 0))
+
+            # Show critique score if available
+            critiques = self.project.get("title_critiques", {})
+            if selected_title in critiques:
+                score = critiques[selected_title].get("score", 0)
+                ctk.CTkLabel(
+                    title_inner, text=f"Оценка: {score}/100",
+                    font=ctk.CTkFont(size=12), text_color=C["green"] if score >= 80 else C["orange"],
+                ).pack(anchor="w", pady=(4, 0))
+
+        # ── Thumbnail ──
+        thumb_path = self.project.get("thumbnail_path")
+        if thumb_path and Path(thumb_path).exists() and HAS_PIL:
+            thumb_card = self._make_card(scroller)
+            thumb_card.pack(fill="x", pady=(0, 12))
+            thumb_inner = ctk.CTkFrame(thumb_card, fg_color="transparent")
+            thumb_inner.pack(fill="x", padx=24, pady=16)
+
+            ctk.CTkLabel(
+                thumb_inner, text="Обложка",
+                font=ctk.CTkFont(size=12), text_color=C["text3"],
+            ).pack(anchor="w", pady=(0, 8))
+
+            try:
+                pil_img = PILImage.open(thumb_path)
+                # Show large preview
+                pil_img.thumbnail((800, 450))
+                ctk_img = CTkImage(pil_img, size=(800, 450))
+                img_label = ctk.CTkLabel(thumb_inner, image=ctk_img, text="", cursor="hand2")
+                img_label.pack(anchor="w")
+                img_label.bind("<Button-1>", lambda e: self._preview_thumbnail(thumb_path))
+                thumb_inner._preview_img = ctk_img
+            except Exception:
+                ctk.CTkLabel(thumb_inner, text=Path(thumb_path).name, text_color=C["text3"]).pack(anchor="w")
+
+        # ── Video player ──
+        video_card = self._make_card(scroller)
+        video_card.pack(fill="x", pady=(0, 12))
+        video_inner = ctk.CTkFrame(video_card, fg_color="transparent")
+        video_inner.pack(fill="x", padx=24, pady=16)
+
+        is_assembled = video_to_preview != self.project["video_path"]
+        video_label = "Склеенное видео" if is_assembled else "Оригинальное видео"
+        ctk.CTkLabel(
+            video_inner, text=video_label,
+            font=ctk.CTkFont(size=12), text_color=C["text3"],
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            video_inner, text=Path(video_to_preview).name,
+            font=ctk.CTkFont(size=14, weight="bold"), text_color=C["text"],
+        ).pack(anchor="w", pady=(4, 8))
+
+        if not is_assembled and "edit" not in self.completed_steps:
+            ctk.CTkLabel(
+                video_inner,
+                text="⚠ Видео ещё не склеено. Перейди на шаг «Сборка» чтобы добавить интро/аутро.",
+                font=ctk.CTkFont(size=12), text_color=C["orange"], wraplength=700,
+            ).pack(anchor="w", pady=(0, 8))
+
+        ctk.CTkButton(
+            video_inner, text="▶ Открыть в плеере", height=40, width=220,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=C["accent"], hover_color=C["accent_hover"], text_color=C["text"],
+            command=lambda: self._open_in_player(video_to_preview),
+        ).pack(anchor="w", pady=(4, 0))
+
+        # ── Description preview ──
+        description = self.project.get("description")
+        if description:
+            desc_card = self._make_card(scroller)
+            desc_card.pack(fill="x", pady=(0, 12))
+            desc_inner = ctk.CTkFrame(desc_card, fg_color="transparent")
+            desc_inner.pack(fill="x", padx=24, pady=16)
+
+            ctk.CTkLabel(
+                desc_inner, text="Описание",
+                font=ctk.CTkFont(size=12), text_color=C["text3"],
+            ).pack(anchor="w")
+
+            desc_text = ctk.CTkTextbox(
+                desc_inner, height=150, font=ctk.CTkFont(size=12),
+                fg_color=C["surface2"], text_color=C["text"], wrap="word",
+            )
+            desc_text.pack(fill="x", pady=(8, 0))
+            desc_text.insert("1.0", description)
+            desc_text.configure(state="disabled")
+
+        self._make_step_footer(scroller, "preview")
+
+    def _open_in_player(self, video_path: str):
+        """Open video in system default player."""
+        import subprocess as sp
+        import platform
+        system = platform.system()
+        try:
+            if system == "Darwin":
+                sp.Popen(["open", video_path])
+            elif system == "Windows":
+                sp.Popen(["start", "", video_path], shell=True)
+            else:
+                sp.Popen(["xdg-open", video_path])
+        except Exception as e:
+            self._show_toast(f"Не удалось открыть плеер: {e}", level="error")
 
     # ---------- 08 Upload ----------
 
@@ -1844,24 +2452,26 @@ class MainWindow(ctk.CTk):
         self.artifacts = ArtifactsManager(project_name=video_name)
         self.video_processor.artifacts = self.artifacts
         self._mark_step_done("import")
-        self._set_status_done(f"Loaded: {Path(filepath).name}")
+        self._set_status_done(f"Загружено: {Path(filepath).name}")
         self._show_import_panel()
 
         import logging
         logging.getLogger(__name__).info(f"Work directory: {work_dir}")
 
+        # Reset parallel counter for pre-thumbnail steps
+        self._pre_thumb_done = 0
+
         # Auto-start transcription + audio cleanup in background
         if "transcribe" not in self.completed_steps:
             self.after(500, self._auto_transcribe)
-        if "audio" not in self.completed_steps:
-            self.after(800, self._auto_audio_cleanup)
+        # Audio cleanup — only manual, not auto (often degrades quality)
 
     def _auto_transcribe(self):
         """Start transcription automatically in background after import."""
         if self.project.get("transcription") or "transcribe" not in self.STEP_DEPS:
             return
         self._mark_step_working("transcribe")
-        self._set_status_working("Auto-transcribing in background...")
+        self._set_status_working("Автотранскрипция в фоне...")
 
         def transcribe_bg():
             try:
@@ -1873,12 +2483,27 @@ class MainWindow(ctk.CTk):
                     from src.processors.chunked_transcriber import transcribe_chunked
 
                 def whisper_fn(wav_path: str) -> str:
-                    result = self.whisper.transcribe(wav_path)
-                    return result.get("text", "")
+                    """Run Whisper in subprocess to avoid GIL blocking UI."""
+                    import subprocess as sp
+                    venv_python = str(Path(__file__).parent.parent.parent / "venv" / "bin" / "python")
+                    script = str(Path(__file__).parent.parent / "processors" / "whisper_subprocess.py")
+                    model = os.getenv("WHISPER_MODEL", "base")
+                    device = os.getenv("WHISPER_DEVICE", "cpu")
+                    result = sp.run(
+                        [venv_python, script, wav_path, model, device],
+                        capture_output=True, text=True, timeout=600,
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(f"Whisper failed: {result.stderr[:200]}")
+                    return result.stdout
+
+                def bg_progress(pct, msg):
+                    logger.info(f"Transcribe: {pct:.0f}% {msg}")
+                    self._ui_call(lambda m=msg: self._set_status_working(m))
 
                 srt_text = transcribe_chunked(
                     self.project["video_path"], whisper_fn,
-                    progress_callback=lambda p, m: logger.info(f"Transcribe: {p:.0f}% {m}"),
+                    progress_callback=bg_progress,
                 )
                 self.project["transcription"] = srt_text
 
@@ -1918,17 +2543,20 @@ class MainWindow(ctk.CTk):
                     except Exception as e:
                         logger.error(f"SRT shift failed: {e}")
 
-                self.after(0, lambda: self._mark_step_done("transcribe"))
-                self.after(0, lambda: self._show_toast(L["transcription_complete"], level="success"))
-                logger.info("Auto-transcription finished, launching titles + thumbnails + descriptions")
+                self._ui_call(lambda: self._mark_step_done("transcribe"))
+                self._ui_call(lambda: self._show_toast(L["transcription_complete"], level="success"))
+                logger.info("Auto-transcription finished, launching titles + descriptions (parallel), then thumbnails")
+                try:
+                    self._save_artifacts()
+                except Exception:
+                    pass
 
-                # Auto-generate titles + thumbnails in background
-                self.after(500, self._auto_generate_titles)
-                self.after(1000, self._auto_generate_thumbnails)
-                self.after(1500, self._auto_generate_descriptions)
+                # Titles and descriptions in parallel, thumbnails after both complete
+                self._ui_call(lambda: self.after(500, self._auto_generate_titles))
+                self._ui_call(lambda: self.after(500, self._auto_generate_descriptions))
             except Exception as e:
-                self.after(0, lambda: self._mark_step_error("transcribe"))
-                self.after(0, lambda: self._show_toast(f"Auto-transcription failed: {str(e)[:100]}", level="error", duration=0))
+                self._ui_call(lambda: self._mark_step_error("transcribe"))
+                self._ui_call(lambda: self._show_toast(f"Auto-transcription failed: {str(e)[:100]}", level="error", duration=0))
 
         threading.Thread(target=transcribe_bg, daemon=True).start()
 
@@ -1947,16 +2575,19 @@ class MainWindow(ctk.CTk):
                 source = self.project.get("original_video_path") or self.project["video_path"]
                 output_path = self._get_work_dir() / "audio_cleaned.wav"
                 cleanup_processor = AudioCleanup(mode="builtin")
-                cleanup_processor.cleanup(source, str(output_path), preset="medium")
+                def auto_audio_progress(pct):
+                    self._ui_call(lambda p=pct: self._set_status_working(f"Очистка звука... {p*100:.0f}%"))
+
+                cleanup_processor.cleanup(source, str(output_path), preset="medium", progress_callback=auto_audio_progress)
                 self.project["audio_path"] = str(output_path)
                 self.project["use_cleaned_audio"] = True
 
-                self.after(0, lambda: self._mark_step_done("audio"))
-                self.after(0, lambda: self._show_toast("Audio cleaned!", level="success"))
-                self.after(0, lambda: self._save_project())
+                self._ui_call(lambda: self._mark_step_done("audio"))
+                self._ui_call(lambda: self._show_toast("Звук очищен!", level="success"))
+                self._ui_call(lambda: self._save_project())
                 logger.info("Auto audio cleanup finished")
             except Exception as e:
-                self.after(0, lambda: self._mark_step_error("audio"))
+                self._ui_call(lambda: self._mark_step_error("audio"))
                 import logging
                 logging.getLogger(__name__).error(f"Auto audio cleanup failed: {e}")
 
@@ -1973,93 +2604,134 @@ class MainWindow(ctk.CTk):
 
         def gen():
             try:
+                import subprocess as sp
+                import tempfile
+
+                self._ui_call(lambda: self._set_status_working("Генерация заголовков..."))
+
+                # Write transcript to temp file for subprocess
                 transcript = self.project.get("transcription", "")
-                best_titles = []
-                best_critiques = {}
-                best_score = 0
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+                    f.write(transcript)
+                    tmp_path = f.name
 
-                for iteration in range(1, MAX_ITERATIONS + 1):
-                    logger.info(f"Title generation iteration {iteration}/{MAX_ITERATIONS}")
-                    self.after(0, lambda i=iteration: self._set_status_working(
-                        f"Генерация заголовков (попытка {i}/{MAX_ITERATIONS})..."
-                    ))
+                try:
+                    venv_python = str(Path(__file__).parent.parent.parent / "venv" / "bin" / "python")
+                    script = str(Path(__file__).parent.parent / "processors" / "title_subprocess.py")
 
-                    titles = self.title_generator.generate_titles(transcript=transcript, count=5, style="engaging")
+                    proc = sp.Popen(
+                        [venv_python, script, tmp_path, "9", str(MAX_ITERATIONS), str(QUALITY_THRESHOLD)],
+                        stdout=sp.PIPE, stderr=sp.PIPE, text=True,
+                    )
 
-                    # Strip angle brackets from titles (YouTube removes them)
-                    titles = [t.replace("<", "(").replace(">", ")") for t in titles]
+                    # Read lines as they come for progress updates
+                    best_titles = []
+                    best_critiques = {}
+                    best_score = 0
 
-                    # Critique all
-                    critiques = {}
-                    for t in titles:
+                    for line in proc.stdout:
+                        line = line.strip()
+                        if not line:
+                            continue
                         try:
-                            critiques[t] = self.title_generator.critique_title(t, transcript=transcript)
-                        except Exception:
+                            data = json.loads(line)
+                            if "progress" in data:
+                                msg = data["progress"]
+                                self._ui_call(lambda m=msg: self._set_status_working(m))
+                            elif "result" in data:
+                                best_titles = data.get("titles", [])
+                                best_critiques = data.get("critiques", {})
+                                best_score = data.get("best_score", 0)
+                        except json.JSONDecodeError:
                             pass
 
-                    # Find best score
-                    top_score = max((c.get("score", 0) for c in critiques.values()), default=0)
-                    logger.info(f"Iteration {iteration}: best score {top_score}/100")
-
-                    if top_score > best_score:
-                        best_titles = titles
-                        best_critiques = critiques
-                        best_score = top_score
-
-                    if top_score >= QUALITY_THRESHOLD:
-                        logger.info(f"Quality threshold {QUALITY_THRESHOLD} reached at iteration {iteration}")
-                        break
+                    proc.wait(timeout=600)
+                    if proc.returncode != 0:
+                        stderr = proc.stderr.read()
+                        raise RuntimeError(f"Title subprocess failed: {stderr[:200]}")
+                finally:
+                    os.unlink(tmp_path)
 
                 self.project["titles"] = best_titles
                 self.project["title_critiques"] = best_critiques
 
-                self.after(0, lambda: self._mark_step_done("titles"))
-                self.after(0, lambda: self._show_toast(
+                # Auto-select best title by critique score
+                if best_critiques:
+                    top_title = max(best_critiques, key=lambda t: best_critiques[t].get("score", 0))
+                    self.project["selected_title"] = top_title
+                    logger.info(f"Auto-selected best title: {top_title}")
+                elif best_titles:
+                    self.project["selected_title"] = best_titles[0]
+
+                self._ui_call(lambda: self._mark_step_done("titles"))
+                self._ui_call(lambda: self._show_toast(
                     f"{len(best_titles)} заголовков (лучший: {best_score}/100)", level="success"
                 ))
-                self.after(0, lambda: self._save_project())
+                self._ui_call(lambda: self._save_project())
                 logger.info(f"Auto-generated {len(best_titles)} titles, best score: {best_score}")
+                try:
+                    self._save_artifacts()
+                except Exception:
+                    pass
+
+                # Signal: titles done, check if thumbnails can start
+                self._on_pre_thumb_step_done()
             except Exception as e:
-                self.after(0, lambda: self._mark_step_error("titles"))
-                self.after(0, lambda: self._show_toast(f"Ошибка генерации заголовков: {str(e)[:100]}", level="error", duration=0))
+                self._ui_call(lambda: self._mark_step_error("titles"))
+                self._ui_call(lambda: self._show_toast(f"Ошибка генерации заголовков: {str(e)[:100]}", level="error", duration=0))
 
         threading.Thread(target=gen, daemon=True).start()
 
     def _auto_generate_thumbnails(self):
-        """Background thumbnail generation after auto-transcribe."""
+        """Background thumbnail generation via subprocess to avoid GIL blocking UI."""
         if self.project.get("thumbnail_paths"):
             return  # Already generated
         self._mark_step_working("thumbnail")
 
         def gen():
             try:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.info("Auto-generating thumbnails...")
+                import subprocess as sp
+                logger.info("Auto-generating thumbnails (subprocess)...")
+                self._ui_call(lambda: self._set_status_working("Генерация обложек..."))
 
                 title = self.project.get("selected_title") or Path(self.project["video_path"]).stem
-                content_summary = self.project.get("content_summary") or self.project.get("transcription", "")[:500]
-                logger.info(f"Thumbnail context: title='{title[:50]}', summary={len(content_summary)} chars")
-                output_dir = self._get_work_dir() / "thumbnails"
+                content_summary = self.project.get("description") or self.project.get("content_summary") or self.project.get("transcription", "")[:500]
+                output_dir = str(self._get_work_dir() / "thumbnails")
 
-                paths = self.cover_generator.generate_covers(
-                    title=title, description=content_summary, count=3,
-                    styles=["vibrant", "dark", "cozy"],
-                    output_dir=output_dir,
-                    reference_image_path=self.project.get("reference_image") or os.getenv("REFERENCE_IMAGE", ""),
-                )
-                str_paths = [str(p) for p in paths]
+                venv_python = str(Path(__file__).parent.parent.parent / "venv" / "bin" / "python")
+                cmd = [
+                    venv_python, str(Path(__file__).parent.parent / "processors" / "cover_generator.py"),
+                    title,
+                    "--description", content_summary[:500],
+                    "--count", "9",
+                    "--styles", "modern", "cinematic", "vibrant", "professional", "creative", "dark", "bright", "tech", "cozy",
+                    "--output", output_dir,
+                ]
+                ref = self.project.get("reference_image") or os.getenv("REFERENCE_IMAGE", "")
+                if ref:
+                    cmd.extend(["--reference", ref])
+
+                result = sp.run(cmd, capture_output=True, text=True, timeout=300)
+                if result.returncode != 0:
+                    raise RuntimeError(f"Cover generation failed: {result.stderr[:200]}")
+
+                # Parse generated file paths from stdout
+                import glob
+                thumb_dir = self._get_work_dir() / "thumbnails"
+                png_files = sorted(thumb_dir.glob("cover_*.png"))
+                str_paths = [str(p) for p in png_files[-9:]]  # last 3
+
                 self.project["thumbnail_paths"] = str_paths
                 if str_paths:
                     self.project["thumbnail_path"] = str_paths[0]
 
-                self.after(0, lambda: self._mark_step_done("thumbnail"))
-                self.after(0, lambda: self._show_toast(f"{len(paths)} thumbnails generated!", level="success"))
-                self.after(0, lambda: self._save_project())
-                logger.info(f"Auto-generated {len(paths)} thumbnails")
+                self._ui_call(lambda: self._mark_step_done("thumbnail"))
+                self._ui_call(lambda: self._show_toast(f"{len(str_paths)} обложек сгенерировано!", level="success"))
+                self._ui_call(lambda: self._save_project())
+                logger.info(f"Auto-generated {len(str_paths)} thumbnails (subprocess)")
             except Exception as e:
-                self.after(0, lambda: self._mark_step_error("thumbnail"))
-                self.after(0, lambda: self._show_toast(f"Thumbnail generation failed: {str(e)[:100]}", level="error", duration=0))
+                self._ui_call(lambda: self._mark_step_error("thumbnail"))
+                self._ui_call(lambda: self._show_toast(f"Ошибка генерации обложек: {str(e)[:100]}", level="error", duration=0))
 
         threading.Thread(target=gen, daemon=True).start()
 
@@ -2067,23 +2739,55 @@ class MainWindow(ctk.CTk):
         """Background description generation after auto-transcribe."""
         if self.project.get("description"):
             return
+        self._mark_step_working("description")
 
         def gen():
             try:
-                logger.info("Auto-generating descriptions...")
-                gen = DescriptionGenerator()
-                descriptions = gen.generate_descriptions(
-                    transcript=self.project.get("transcription", ""),
-                    title=self.project.get("selected_title") or Path(self.project["video_path"]).stem,
-                    count=3,
-                )
+                import subprocess as sp
+                import tempfile
+
+                logger.info("Auto-generating descriptions (subprocess)...")
+                self._ui_call(lambda: self._set_status_working("Генерация описаний..."))
+
+                transcript = self.project.get("transcription", "")
+                title = self.project.get("selected_title") or Path(self.project["video_path"]).stem
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+                    f.write(transcript)
+                    tmp_path = f.name
+
+                try:
+                    venv_python = str(Path(__file__).parent.parent.parent / "venv" / "bin" / "python")
+                    script = str(Path(__file__).parent.parent / "processors" / "description_subprocess.py")
+
+                    result = sp.run(
+                        [venv_python, script, tmp_path, title, "9"],
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(f"Description subprocess failed: {result.stderr[:200]}")
+
+                    data = json.loads(result.stdout.strip())
+                    descriptions = data.get("descriptions", [])
+                finally:
+                    os.unlink(tmp_path)
+
                 if descriptions:
                     self.project["description"] = descriptions[0]
                     self.project["descriptions"] = descriptions
-                self.after(0, lambda: self._show_toast(L["descriptions_generated"], level="success"))
-                self.after(0, lambda: self._save_project())
-                logger.info(f"Auto-generated {len(descriptions)} descriptions")
+                self._ui_call(lambda: self._mark_step_done("description"))
+                self._ui_call(lambda: self._show_toast(L["descriptions_generated"], level="success"))
+                self._ui_call(lambda: self._save_project())
+                logger.info(f"Auto-generated {len(descriptions)} descriptions (subprocess)")
+                try:
+                    self._save_artifacts()
+                except Exception:
+                    pass
+
+                # Signal: descriptions done, check if thumbnails can start
+                self._on_pre_thumb_step_done()
             except Exception as e:
+                self._ui_call(lambda: self._mark_step_error("description"))
                 logger.error(f"Auto description generation failed: {e}")
 
         threading.Thread(target=gen, daemon=True).start()
@@ -2091,7 +2795,7 @@ class MainWindow(ctk.CTk):
     def _run_transcription(self):
         engine = self._transcribe_engine.get()
         self._mark_step_working("transcribe")
-        self._set_status_working(f"Transcribing ({engine})...")
+        self._set_status_working(f"Транскрипция ({engine})...")
         self._transcribe_btn.configure(state="disabled", text="Transcribing...")
         self._transcribe_progress.set(0)
 
@@ -2105,8 +2809,8 @@ class MainWindow(ctk.CTk):
                 video_path = self.project["video_path"]
 
                 def ui_progress(pct, msg):
-                    self.after(0, lambda p=pct: self._transcribe_progress.set(p / 100))
-                    self.after(0, lambda m=msg: self._set_status_working(m))
+                    self._ui_call(lambda p=pct: self._transcribe_progress.set(p / 100))
+                    self._ui_call(lambda m=msg: self._set_status_working(m))
 
                 if engine == "parakeet":
                     # Parakeet transcribe function for chunks
@@ -2158,16 +2862,16 @@ class MainWindow(ctk.CTk):
                     except Exception:
                         pass
 
-                self.after(0, lambda: self._transcribe_progress.set(1.0))
-                self.after(0, lambda: self._mark_step_done("transcribe"))
-                self.after(0, lambda: self._set_status_done("Transcription complete!"))
-                self.after(0, self._show_transcribe_panel)
+                self._ui_call(lambda: self._transcribe_progress.set(1.0))
+                self._ui_call(lambda: self._mark_step_done("transcribe"))
+                self._ui_call(lambda: self._set_status_done("Транскрипция завершена!"))
+                self._ui_call(self._show_transcribe_panel)
             except Exception as e:
                 error_msg = str(e)
-                self.after(0, lambda: self._mark_step_error("transcribe"))
-                self.after(0, lambda: self._set_status_error("Transcription failed"))
-                self.after(0, lambda: self._show_toast(f"Transcription failed: {error_msg}", level="error", duration=0))
-                self.after(0, lambda: self._transcribe_btn.configure(state="normal", text="Start Transcription"))
+                self._ui_call(lambda: self._mark_step_error("transcribe"))
+                self._ui_call(lambda: self._set_status_error("Ошибка транскрипции"))
+                self._ui_call(lambda: self._show_toast(f"Ошибка транскрипции: {error_msg}", level="error", duration=0))
+                self._ui_call(lambda: self._transcribe_btn.configure(state="normal", text="Начать транскрипцию"))
 
         threading.Thread(target=transcribe, daemon=True).start()
 
@@ -2186,8 +2890,8 @@ class MainWindow(ctk.CTk):
         mode = self._audio_mode.get()
         preset = self._audio_preset.get()
         self._mark_step_working("audio")
-        self._set_status_working(f"Cleaning audio ({mode}, {preset})...")
-        self._audio_btn.configure(state="disabled", text="Processing...")
+        self._set_status_working(f"Очистка звука ({mode}, {preset})...")
+        self._audio_btn.configure(state="disabled", text="Обработка...")
 
         def cleanup():
             try:
@@ -2195,29 +2899,33 @@ class MainWindow(ctk.CTk):
                 source = self.project.get("original_video_path") or self.project["video_path"]
                 output_path = self._get_work_dir() / "audio_cleaned.wav"
                 cleanup_processor = AudioCleanup(mode=mode)
+                def audio_progress(pct):
+                    self._ui_call(lambda p=pct: self._set_status_working(f"Очистка звука... {p*100:.0f}%"))
+
                 cleanup_processor.cleanup(
                     source, str(output_path),
                     preset=preset,
+                    progress_callback=audio_progress,
                 )
                 self.project["audio_path"] = str(output_path)
-                self.after(0, lambda: self._mark_step_done("audio"))
-                self.after(0, lambda: self._set_status_done("Audio cleaned!"))
-                self.after(0, lambda: self._audio_btn.configure(state="normal", text="Clean Audio"))
-                self.after(0, lambda: self._show_toast(f"Audio cleaned! ({mode}, {preset})", level="success"))
-                self.after(0, self._show_audio_cleanup_panel)
+                self._ui_call(lambda: self._mark_step_done("audio"))
+                self._ui_call(lambda: self._set_status_done("Звук очищен!"))
+                self._ui_call(lambda: self._audio_btn.configure(state="normal", text="Очистить звук"))
+                self._ui_call(lambda: self._show_toast(f"Звук очищен! ({mode}, {preset})", level="success"))
+                self._ui_call(self._show_audio_cleanup_panel)
             except Exception as e:
                 error_msg = str(e)
-                self.after(0, lambda: self._mark_step_error("audio"))
-                self.after(0, lambda: self._set_status_error("Cleanup failed"))
-                self.after(0, lambda: self._show_toast(f"Audio cleanup failed: {error_msg}", level="error", duration=0))
-                self.after(0, lambda: self._audio_btn.configure(state="normal", text="Clean Audio"))
+                self._ui_call(lambda: self._mark_step_error("audio"))
+                self._ui_call(lambda: self._set_status_error("Ошибка очистки"))
+                self._ui_call(lambda: self._show_toast(f"Audio cleanup failed: {error_msg}", level="error", duration=0))
+                self._ui_call(lambda: self._audio_btn.configure(state="normal", text="Очистить звук"))
 
         threading.Thread(target=cleanup, daemon=True).start()
 
     def _run_title_generation(self):
         self._mark_step_working("titles")
-        self._set_status_working("Generating titles...")
-        self._titles_btn.configure(state="disabled", text="Generating...")
+        self._set_status_working("Генерация заголовков...")
+        self._titles_btn.configure(state="disabled", text="Генерация...")
 
         def generate():
             try:
@@ -2230,11 +2938,11 @@ class MainWindow(ctk.CTk):
                     transcript = f"{transcript}\n\nAdditional context from user: {custom}"
                 titles = self.title_generator.generate_titles(
                     transcript=transcript,
-                    count=5, style="engaging",
+                    count=9, style="engaging",
                 )
                 self.project["titles"] = titles
                 # Auto-critique all titles
-                self.after(0, lambda: self._set_status_working("Critiquing titles..."))
+                self._ui_call(lambda: self._set_status_working("Оценка заголовков..."))
                 critiques = {}
                 for t in titles:
                     try:
@@ -2242,14 +2950,14 @@ class MainWindow(ctk.CTk):
                     except Exception:
                         pass
                 self.project["title_critiques"] = critiques
-                self.after(0, lambda: self._set_status_done("Titles generated with critique!"))
-                self.after(0, self._show_titles_panel)
+                self._ui_call(lambda: self._set_status_done("Заголовки сгенерированы с оценкой!"))
+                self._ui_call(self._show_titles_panel)
             except Exception as e:
                 error_msg = str(e)
-                self.after(0, lambda: self._mark_step_error("titles"))
-                self.after(0, lambda: self._set_status_error("Title generation failed"))
-                self.after(0, lambda: self._show_toast(f"Title generation failed: {error_msg}", level="error", duration=0))
-                self.after(0, lambda: self._titles_btn.configure(state="normal", text="Generate Titles"))
+                self._ui_call(lambda: self._mark_step_error("titles"))
+                self._ui_call(lambda: self._set_status_error("Ошибка генерации заголовков"))
+                self._ui_call(lambda: self._show_toast(f"Ошибка генерации заголовков: {error_msg}", level="error", duration=0))
+                self._ui_call(lambda: self._titles_btn.configure(state="normal", text="Сгенерировать заголовки"))
 
         threading.Thread(target=generate, daemon=True).start()
 
@@ -2260,7 +2968,7 @@ class MainWindow(ctk.CTk):
         self._show_titles_panel()
 
     def _run_title_critique(self):
-        self._set_status_working("Critiquing titles...")
+        self._set_status_working("Оценка заголовков...")
         self._critique_btn.configure(state="disabled", text="Critiquing...")
 
         def critique():
@@ -2273,61 +2981,68 @@ class MainWindow(ctk.CTk):
                     )
                     critiques[title_text] = result
                 self.project["title_critiques"] = critiques
-                self.after(0, lambda: self._set_status_done("Critique complete!"))
-                self.after(0, self._show_titles_panel)
+                self._ui_call(lambda: self._set_status_done("Оценка завершена!"))
+                self._ui_call(self._show_titles_panel)
             except Exception as e:
                 error_msg = str(e)
-                self.after(0, lambda: self._set_status_error("Critique failed"))
-                self.after(0, lambda: self._show_toast(f"Critique failed: {error_msg}", level="error", duration=0))
-                self.after(0, lambda: self._critique_btn.configure(state="normal", text="Critique All Titles"))
+                self._ui_call(lambda: self._set_status_error("Ошибка оценки"))
+                self._ui_call(lambda: self._show_toast(f"Ошибка оценки: {error_msg}", level="error", duration=0))
+                self._ui_call(lambda: self._critique_btn.configure(state="normal", text="Оценить все заголовки"))
 
         threading.Thread(target=critique, daemon=True).start()
 
     def _run_thumbnail_generation(self):
         self._mark_step_working("thumbnail")
-        self._set_status_working("Generating thumbnails...")
-        self._thumb_btn.configure(state="disabled", text="Generating...")
+        self._set_status_working("Генерация обложек...")
+        self._thumb_btn.configure(state="disabled", text="Генерация...")
         self._thumb_progress.set(0)
 
         def generate():
             try:
-                output_dir = self._get_work_dir() / "thumbnails"
+                import subprocess as sp
+                output_dir = str(self._get_work_dir() / "thumbnails")
 
-                def progress_cb(current, total, msg):
-                    pct = current / total if total > 0 else 0
-                    self.after(0, lambda p=pct: self._thumb_progress.set(p))
-                    self.after(0, lambda m=msg: self._set_status_working(m))
-
-                # Custom prompt from user
                 custom_thumb = self._thumb_custom_prompt.get("1.0", "end").strip() if hasattr(self, "_thumb_custom_prompt") else ""
                 title_for_gen = self.project.get("selected_title") or Path(self.project["video_path"]).stem
-                desc_for_gen = self.project.get("transcription", "")[:500] if self.project.get("transcription") else None
+                desc_for_gen = self.project.get("description") or self.project.get("transcription", "")[:500] or ""
                 if custom_thumb:
-                    desc_for_gen = f"{desc_for_gen or ''}\n\nUser request: {custom_thumb}"
+                    desc_for_gen = f"{desc_for_gen}\n\nUser request: {custom_thumb}"
 
-                paths = self.cover_generator.generate_covers(
-                    title=title_for_gen,
-                    description=desc_for_gen,
-                    count=3,
-                    styles=["vibrant", "dark", "cozy"],
-                    output_dir=output_dir,
-                    reference_image_path=self.project.get("reference_image") or os.getenv("REFERENCE_IMAGE", ""),
-                    progress_callback=progress_cb,
-                )
-                str_paths = [str(p) for p in paths]
+                venv_python = str(Path(__file__).parent.parent.parent / "venv" / "bin" / "python")
+                cmd = [
+                    venv_python, str(Path(__file__).parent.parent / "processors" / "cover_generator.py"),
+                    title_for_gen,
+                    "--description", desc_for_gen[:500],
+                    "--count", "9",
+                    "--styles", "modern", "cinematic", "vibrant", "professional", "creative", "dark", "bright", "tech", "cozy",
+                    "--output", output_dir,
+                ]
+                ref = self.project.get("reference_image") or os.getenv("REFERENCE_IMAGE", "")
+                if ref:
+                    cmd.extend(["--reference", ref])
+
+                self._ui_call(lambda: self._thumb_progress.set(0.2))
+                result = sp.run(cmd, capture_output=True, text=True, timeout=300)
+                if result.returncode != 0:
+                    raise RuntimeError(f"Cover generation failed: {result.stderr[:200]}")
+
+                thumb_dir = self._get_work_dir() / "thumbnails"
+                png_files = sorted(thumb_dir.glob("cover_*.png"))
+                str_paths = [str(p) for p in png_files[-9:]]
+
                 self.project["thumbnail_paths"] = str_paths
                 if str_paths:
                     self.project["thumbnail_path"] = str_paths[0]
-                self.after(0, lambda: self._thumb_progress.set(1.0))
-                self.after(0, lambda: self._set_status_done(f"Generated {len(paths)} thumbnails — choose one!"))
-                self.after(0, lambda: self._thumb_btn.configure(state="normal", text="Generate 3 Thumbnails"))
-                self.after(0, self._show_thumbnail_panel)
+                self._ui_call(lambda: self._thumb_progress.set(1.0))
+                self._ui_call(lambda: self._set_status_done(f"Сгенерировано {len(str_paths)} обложек — выбери лучшую!"))
+                self._ui_call(lambda: self._thumb_btn.configure(state="normal", text="Сгенерировать 9 обложек"))
+                self._ui_call(self._show_thumbnail_panel)
             except Exception as e:
                 error_msg = str(e)
-                self.after(0, lambda: self._mark_step_error("thumbnail"))
-                self.after(0, lambda: self._set_status_error("Thumbnail generation failed"))
-                self.after(0, lambda: self._show_toast(f"Thumbnail generation failed: {error_msg}", level="error", duration=0))
-                self.after(0, lambda: self._thumb_btn.configure(state="normal", text="Generate 3 Thumbnails"))
+                self._ui_call(lambda: self._mark_step_error("thumbnail"))
+                self._ui_call(lambda: self._set_status_error("Ошибка генерации обложек"))
+                self._ui_call(lambda: self._show_toast(f"Thumbnail generation failed: {error_msg}", level="error", duration=0))
+                self._ui_call(lambda: self._thumb_btn.configure(state="normal", text="Сгенерировать 9 обложек"))
 
         threading.Thread(target=generate, daemon=True).start()
 
@@ -2376,8 +3091,8 @@ class MainWindow(ctk.CTk):
     # ══════════════════════════════════════════
 
     def _run_description_generation(self):
-        self._set_status_working("Generating descriptions...")
-        self._desc_btn.configure(state="disabled", text="Generating...")
+        self._set_status_working("Генерация описаний...")
+        self._desc_btn.configure(state="disabled", text="Генерация...")
 
         def generate():
             try:
@@ -2385,20 +3100,20 @@ class MainWindow(ctk.CTk):
                 descriptions = gen.generate_descriptions(
                     transcript=self.project.get("transcription", ""),
                     title=self.project.get("selected_title", ""),
-                    count=3,
+                    count=9,
                 )
                 # Use first as default, store all
                 if descriptions:
                     self.project["description"] = descriptions[0]
                     self.project["descriptions"] = descriptions
-                self.after(0, lambda: self._set_status_done(f"Generated {len(descriptions)} descriptions!"))
-                self.after(0, lambda: self._desc_btn.configure(state="normal", text="Generate 3 Descriptions"))
-                self.after(0, self._show_upload_panel)
+                self._ui_call(lambda: self._set_status_done(f"Сгенерировано {len(descriptions)} описаний!"))
+                self._ui_call(lambda: self._desc_btn.configure(state="normal", text="Сгенерировать 9 описаний"))
+                self._ui_call(self._show_upload_panel)
             except Exception as e:
                 error_msg = str(e)
-                self.after(0, lambda: self._set_status_error("Description generation failed"))
-                self.after(0, lambda: self._show_toast(f"Description generation failed: {error_msg}", level="error", duration=0))
-                self.after(0, lambda: self._desc_btn.configure(state="normal", text="Generate 3 Descriptions"))
+                self._ui_call(lambda: self._set_status_error("Ошибка генерации описаний"))
+                self._ui_call(lambda: self._show_toast(f"Ошибка генерации описаний: {error_msg}", level="error", duration=0))
+                self._ui_call(lambda: self._desc_btn.configure(state="normal", text="Сгенерировать 9 описаний"))
 
         threading.Thread(target=generate, daemon=True).start()
 
@@ -2451,11 +3166,137 @@ class MainWindow(ctk.CTk):
             self._save_project()
             self._show_edit_panel()
 
+    def _set_ovl_position(self, pos_key: str):
+        """Update overlay position from grid button click."""
+        self._ovl_position_var.set(pos_key)
+        self._ovl_position.set(pos_key)
+        self.project["overlay_position"] = pos_key
+        # Update button styles
+        for pk, btn in self._ovl_pos_btns.items():
+            if pk == pos_key:
+                btn.configure(fg_color=C["accent"], text_color=C["text"])
+            else:
+                btn.configure(fg_color=C["surface3"], text_color=C["text3"])
+
+    def _preview_overlay_position(self):
+        """Generate a single-frame preview of the overlay position."""
+        overlay_path = self.project.get("subscribe_overlay_path")
+        video_path = self.project.get("video_path")
+        if not overlay_path or not video_path:
+            self._show_toast("Нужно видео и оверлей для предпросмотра", level="warning")
+            return
+
+        position = self._ovl_position.get() if hasattr(self, "_ovl_position") else "bottom-left"
+        scale_pct = int(self._ovl_scale.get()) if hasattr(self, "_ovl_scale") else 100
+        overlay_width = int(576 * scale_pct / 100)
+
+        pos_map = {
+            "top-left": "20:20",
+            "top-center": "(W-w)/2:20",
+            "top-right": "W-w-20:20",
+            "center-left": "20:(H-h)/2",
+            "center": "(W-w)/2:(H-h)/2",
+            "center-right": "W-w-20:(H-h)/2",
+            "bottom-left": "20:H-h-20",
+            "bottom-center": "(W-w)/2:H-h-20",
+            "bottom-right": "W-w-20:H-h-20",
+        }
+        overlay_pos = pos_map.get(position, pos_map["bottom-left"])
+
+        import subprocess as _sp, tempfile as _tf
+        ffmpeg = Settings.get_ffmpeg() if Settings else "ffmpeg"
+
+        with _tf.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        filter_complex = (
+            f"[1:v]trim=0:1,setpts=PTS-STARTPTS,"
+            f"chromakey=0x00FF00:0.1:0.2,"
+            f"scale={overlay_width}:-1[ovr];"
+            f"[0:v][ovr]overlay={overlay_pos}[outv]"
+        )
+
+        cmd = [
+            ffmpeg, "-y",
+            "-ss", "5", "-i", video_path,
+            "-ss", "0", "-i", overlay_path,
+            "-filter_complex", filter_complex,
+            "-map", "[outv]",
+            "-frames:v", "1", "-q:v", "3",
+            tmp_path,
+        ]
+
+        def generate():
+            try:
+                _sp.run(cmd, capture_output=True, timeout=15)
+                if Path(tmp_path).exists() and Path(tmp_path).stat().st_size > 0:
+                    self._ui_call(lambda: self._show_overlay_preview(tmp_path))
+                else:
+                    self._ui_call(lambda: self._show_toast("Не удалось создать предпросмотр", level="error"))
+            except Exception as e:
+                self._ui_call(lambda: self._show_toast(f"Ошибка предпросмотра: {str(e)[:100]}", level="error"))
+
+        threading.Thread(target=generate, daemon=True).start()
+        self._show_toast("Генерация предпросмотра...", level="info")
+
+    def _show_overlay_preview(self, image_path: str):
+        """Show overlay preview in a popup window."""
+        if not HAS_PIL:
+            self._show_toast("PIL не установлен для предпросмотра", level="error")
+            return
+
+        pil_img = PILImage.open(image_path)
+        # Fit in 800x500
+        pil_img.thumbnail((800, 500))
+        w, h = pil_img.size
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Предпросмотр оверлея")
+        dialog.geometry(f"{w + 32}x{h + 80}")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.configure(fg_color=C["surface"])
+
+        # Center
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - w - 32) // 2
+        y = self.winfo_y() + (self.winfo_height() - h - 80) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        ctk_img = CTkImage(pil_img, size=(w, h))
+        ctk.CTkLabel(dialog, image=ctk_img, text="").pack(padx=16, pady=(12, 8))
+        ctk.CTkButton(
+            dialog, text="Закрыть", width=100, height=32,
+            fg_color=C["surface3"], hover_color=C["border"], text_color=C["text2"],
+            command=dialog.destroy,
+        ).pack(pady=(0, 12))
+
+        # Cleanup temp file
+        try:
+            Path(image_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _on_drop_assembly_file(self, event, key: str):
+        """Handle drag & drop onto intro/outro/overlay zones."""
+        filepath = event.data.strip().strip("{}")
+        if not filepath:
+            return
+        ext = Path(filepath).suffix.lower()
+        if ext not in (".mp4", ".mov", ".avi", ".mkv"):
+            self._show_toast("Поддерживаются только видеофайлы (MP4, MOV, AVI, MKV)", level="warning")
+            return
+        logger.info(f"Drop on {key}: {filepath}")
+        self.project[key] = filepath
+        self._save_project()
+        self._show_edit_panel()
+
     # ══════════════════════════════════════════
     #  Settings / Help / Projects
     # ══════════════════════════════════════════
 
-    def _open_projects(self):
+    def _show_projects_panel(self):
+        """Show projects panel inline in the content area."""
         try:
             from .project_manager_panel import ProjectManagerPanel
         except ImportError:
@@ -2474,6 +3315,9 @@ class MainWindow(ctk.CTk):
                 self._show_toast("Project module not available", level="error")
                 return
 
+        self._clear_content()
+        self._set_active_step("import", L["projects"])
+
         pm = ProjectManager()
 
         # Save current project to project manager before opening
@@ -2489,29 +3333,16 @@ class MainWindow(ctk.CTk):
         current_video = self.project.get("video_path")
 
         def on_delete_current():
-            """Called when user deletes the currently active project."""
             self._reset_project()
-            win.destroy()
 
-        win = ProjectManagerPanel(
-            self,
-            project_manager=pm,
-            on_project_open=lambda state: self._switch_project(state, win),
-            on_project_create=lambda vp: self._create_and_switch_project(vp, win),
-            current_video_path=current_video,
-            on_current_deleted=on_delete_current,
-        )
-        win.transient(self)
-        win.grab_set()
-
-        # Show current project info at the top
+        # Current project info bar
         if self.project.get("video_path"):
             current_name = Path(self.project["video_path"]).stem
             steps_done = len(self.completed_steps)
-            info_text = f"Current project: {current_name} ({steps_done} steps done)"
+            info_text = f"Текущий проект: {current_name} ({steps_done} шагов выполнено)"
 
-            info_bar = ctk.CTkFrame(win, fg_color=C["accent_dim"], corner_radius=0, height=36)
-            info_bar.pack(fill="x", side="top", before=win.winfo_children()[0])
+            info_bar = ctk.CTkFrame(self.content_frame, fg_color=C["accent_dim"], corner_radius=8, height=36)
+            info_bar.pack(fill="x", padx=24, pady=(16, 0))
             info_bar.pack_propagate(False)
 
             ctk.CTkLabel(
@@ -2520,15 +3351,37 @@ class MainWindow(ctk.CTk):
             ).pack(side="left", padx=16)
 
             ctk.CTkButton(
-                info_bar, text="Save Current", width=100, height=26,
+                info_bar, text="Сохранить текущий", width=140, height=26,
                 font=ctk.CTkFont(size=11, weight="bold"),
                 fg_color=C["green"], hover_color="#00a884",
                 text_color=C["text"],
-                command=lambda: self._save_current_project_to_manager(pm, win),
+                command=lambda: self._save_current_project_to_manager(pm),
             ).pack(side="right", padx=12)
 
+        # Embed ProjectManagerPanel as a frame (not Toplevel)
+        panel = ProjectManagerPanel(
+            self.content_frame,
+            project_manager=pm,
+            on_project_open=lambda state: self._switch_project(state),
+            on_project_create=lambda vp: self._create_and_switch_project(vp),
+            current_video_path=current_video,
+            on_current_deleted=on_delete_current,
+            is_embedded=True,
+        )
+        panel.pack(fill="both", expand=True, padx=24, pady=16)
+
     def _reset_project(self):
-        """Clear everything — return to blank state."""
+        """Clear everything — delete work dir and return to blank state."""
+        import shutil
+        # Delete work directory with all artifacts
+        wd = self.project.get("work_dir")
+        if wd and Path(wd).exists():
+            try:
+                shutil.rmtree(wd)
+                logger.info(f"Deleted work directory: {wd}")
+            except Exception as e:
+                logger.error(f"Failed to delete work dir: {e}")
+
         self.project = {k: ([] if isinstance(v, list) else ({} if isinstance(v, dict) else None))
                         for k, v in self.project.items()}
         self.completed_steps.clear()
@@ -2538,7 +3391,7 @@ class MainWindow(ctk.CTk):
         self._show_import_panel()
         self._show_toast(L["project_deleted"], level="info")
 
-    def _save_current_project_to_manager(self, pm, win=None):
+    def _save_current_project_to_manager(self, pm):
         """Save current project state into the project manager."""
         try:
             name = Path(self.project.get("video_path", "untitled")).stem
@@ -2558,14 +3411,11 @@ class MainWindow(ctk.CTk):
             else:
                 pm.create_project(name, self.project["video_path"])
 
-            self._show_toast(f"Project '{name}' saved!", level="success")
-            # Refresh the list if window is open
-            if win and hasattr(win, "_refresh_list"):
-                win._refresh_list()
+            self._show_toast(f"Проект '{name}' сохранён!", level="success")
         except Exception as e:
             self._show_toast(f"Save failed: {e}", level="error")
 
-    def _switch_project(self, state: dict, win=None):
+    def _switch_project(self, state: dict):
         """Switch to an existing project."""
         self.project.update(state)
         self.completed_steps = set(state.get("completed_steps", []))
@@ -2574,12 +3424,10 @@ class MainWindow(ctk.CTk):
         self.video_processor.artifacts = self.artifacts
         for step_id in self.completed_steps:
             if step_id in self._sidebar_badges:
-                self._sidebar_badges[step_id].configure(text="done", text_color=C["green"])
-        if win:
-            win.destroy()
+                self._sidebar_badges[step_id].configure(text="  \u2713", text_color=C["green"])
         self._show_import_panel()
 
-    def _create_and_switch_project(self, video_path: str, win=None):
+    def _create_and_switch_project(self, video_path: str):
         """Create new project from video path."""
         self.project = {k: None for k in self.project}
         self.project.update({"titles": [], "title_critiques": {}, "thumbnail_paths": []})
@@ -2592,43 +3440,21 @@ class MainWindow(ctk.CTk):
         self._save_project()
         for sid in self._sidebar_badges:
             self._sidebar_badges[sid].configure(text="")
-        self._sidebar_badges["import"].configure(text="done", text_color=C["green"])
-        if win:
-            win.destroy()
+        self._sidebar_badges["import"].configure(text="  \u2713", text_color=C["green"])
         self._show_import_panel()
 
-    def _open_batch(self):
-        try:
-            from .batch_panel import BatchPanel
-        except ImportError:
-            try:
-                from ui.batch_panel import BatchPanel
-            except ImportError:
-                messagebox.showinfo("Batch", "Batch processing not available yet.")
-                return
-
-        win = ctk.CTkToplevel(self)
-        win.title("Batch Processing")
-        win.geometry("800x600")
-        win.transient(self)
-
-        panel = BatchPanel(win, on_batch_complete=lambda results: self._set_status_done(f"Batch done: {len(results)} videos"))
-        panel.pack(fill="both", expand=True)
-
-    def _open_settings(self):
-        win = ctk.CTkToplevel(self)
-        win.title("Settings")
-        win.geometry("600x600")
-        win.transient(self)
-        win.grab_set()
+    def _show_settings_panel(self):
+        """Show settings inline in the content area."""
+        self._clear_content()
+        self._set_active_step("import", L["settings"])
 
         try:
             from .settings_panel import SettingsPanel
         except ImportError:
             from ui.settings_panel import SettingsPanel
 
-        panel = SettingsPanel(win, on_save=self._on_settings_saved)
-        panel.pack(fill="both", expand=True, padx=16, pady=16)
+        panel = SettingsPanel(self.content_frame, on_save=self._on_settings_saved)
+        panel.pack(fill="both", expand=True, padx=24, pady=16)
 
     def _on_settings_saved(self, settings: dict):
         """Refresh processors with new API keys and model after settings change."""
@@ -2648,24 +3474,39 @@ class MainWindow(ctk.CTk):
             self.cover_generator.set_model(model)
         self._show_toast(L["settings_applied"], level="success")
 
-    def _open_help(self):
-        win = ctk.CTkToplevel(self)
-        win.title("Help")
-        win.geometry("480x380")
-        win.transient(self)
+    def _show_help_panel(self):
+        """Show help inline in the content area."""
+        self._clear_content()
+        self._set_active_step("import", L["help"])
 
-        txt = ctk.CTkTextbox(win, font=ctk.CTkFont(size=13), wrap="word")
-        txt.pack(fill="both", expand=True, padx=16, pady=16)
+        wrapper = ctk.CTkFrame(self.content_frame, fg_color="transparent")
+        wrapper.pack(expand=True, fill="both", padx=24, pady=16)
+
+        ctk.CTkLabel(
+            wrapper, text="Справка",
+            font=ctk.CTkFont(size=24, weight="bold"), text_color=C["text"],
+        ).pack(anchor="w", pady=(0, 16))
+
+        txt = ctk.CTkTextbox(wrapper, font=ctk.CTkFont(size=14), wrap="word", fg_color=C["surface2"])
+        txt.pack(fill="both", expand=True)
         txt.insert("1.0", (
-            "Video Studio — Workflow\n\n"
-            "01  Import video file\n"
-            "02  Edit & trim on the timeline\n"
-            "03  Transcribe audio with Whisper\n"
-            "04  Clean audio (noise reduction)\n"
-            "05  Generate engaging titles with AI\n"
-            "06  Create thumbnail with Gemini\n"
-            "07  Preview the result\n"
-            "08  Upload to YouTube\n\n"
-            "See README.md for details."
+            "Video Studio — Пайплайн для YouTube\n\n"
+            "01  Импорт — загрузи видеофайл\n"
+            "02  Сборка — добавь интро, аутро, оверлей подписки\n"
+            "03  Транскрипция — автоматические субтитры через Whisper\n"
+            "04  Очистка звука — удаление шума, нормализация\n"
+            "05  Заголовки — AI генерирует 9 вариантов с оценкой\n"
+            "06  Обложки — 9 обложек в разных стилях через Gemini\n"
+            "07  Описание — 9 вариантов описания для YouTube\n"
+            "08  Предпросмотр — проверь результат\n"
+            "09  Экспорт — загрузи на YouTube\n\n"
+            "Все шаги запускаются автоматически после импорта.\n"
+            "Можно переключаться между шагами в любой момент.\n\n"
+            "Горячие клавиши:\n"
+            "  Cmd+V — вставить путь к файлу\n"
+            "  Cmd+S — сохранить проект\n\n"
+            "Настройки:\n"
+            "  GEMINI_API_KEY — ключ Google Gemini для AI-генерации\n"
+            "  WHISPER_MODEL — модель Whisper (base/small/medium/large)\n"
         ))
         txt.configure(state="disabled")

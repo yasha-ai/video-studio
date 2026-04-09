@@ -57,8 +57,8 @@ def play_media(parent, file_path: str, title: Optional[str] = None):
     if not Path(file_path).exists():
         return
 
-    # Stop any existing playback
-    stop_playback()
+    # Stop any existing playback (non-blocking)
+    threading.Thread(target=stop_playback, daemon=True).start()
 
     ffplay = _get_ffplay()
     fname = Path(file_path).name

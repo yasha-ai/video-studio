@@ -35,15 +35,15 @@ class CoverGenerator:
     DEFAULT_HEIGHT = 720
 
     STYLE_TEMPLATES = {
-        'modern': 'modern minimalist design with bold typography, clean lines, high contrast',
-        'cinematic': 'cinematic movie poster style, dramatic lighting, epic composition',
-        'vibrant': 'vibrant colorful aesthetic, energetic vibe, eye-catching elements',
-        'professional': 'professional business style, clean layout, corporate colors',
-        'creative': 'creative artistic design, unique visual elements, expressive colors',
-        'dark': 'dark moody atmosphere with neon accents, code/terminal in background, mysterious tech vibe',
-        'bright': 'bright cheerful design, warm colors, inviting atmosphere',
-        'tech': 'futuristic tech style, neon accents, digital elements',
-        'cozy': 'cozy lifestyle — author at computer/laptop in home office or coffee shop, warm lighting, cup of coffee, learning atmosphere, code on screen if programming topic',
+        'modern': 'современный минималистичный дизайн с крупной типографикой, чистые линии, высокий контраст',
+        'cinematic': 'кинематографичный стиль постера, драматичное освещение, эпичная композиция',
+        'vibrant': 'яркая красочная эстетика, энергичная атмосфера, привлекающие внимание элементы',
+        'professional': 'профессиональный деловой стиль, чистая компоновка, корпоративные цвета',
+        'creative': 'креативный художественный дизайн, уникальные визуальные элементы, выразительные цвета',
+        'dark': 'тёмная атмосфера с неоновыми акцентами, код/терминал на фоне, загадочный tech-вайб',
+        'bright': 'светлый жизнерадостный дизайн, тёплые цвета, приветливая атмосфера',
+        'tech': 'футуристичный tech-стиль, неоновые акценты, цифровые элементы',
+        'cozy': 'уютный lifestyle — автор за компьютером/ноутбуком в домашнем офисе или кофейне, тёплое освещение, чашка кофе, атмосфера обучения, код на экране если тема программирования',
     }
 
     # Preferred image models in order of priority
@@ -150,21 +150,21 @@ class CoverGenerator:
         style_desc = self.STYLE_TEMPLATES.get(style, style)
 
         prompt_parts = [
-            f"Create a YouTube thumbnail image for a video titled: \"{title}\"",
-            f"Visual style: {style_desc}",
-            "Requirements:",
-            "- 1280x720 pixels (16:9 aspect ratio)",
-            "- Bold, readable text for the title",
-            "- Eye-catching visual composition",
-            "- Professional quality",
-            "- No watermarks or logos"
+            f"Создай обложку (thumbnail) для YouTube-видео с названием: \"{title}\"",
+            f"Визуальный стиль: {style_desc}",
+            "Требования:",
+            "- 1280x720 пикселей (16:9)",
+            "- Крупный, читаемый текст заголовка НА РУССКОМ ЯЗЫКЕ (IT-термины вроде TypeScript, React, Git можно на английском)",
+            "- Привлекающая внимание композиция",
+            "- Профессиональное качество",
+            "- Без водяных знаков и логотипов",
         ]
 
         if description:
-            prompt_parts.insert(1, f"Video context: {description[:200]}")
+            prompt_parts.insert(1, f"Контекст видео: {description[:200]}")
 
         if custom_elements:
-            prompt_parts.append(f"Additional elements: {custom_elements}")
+            prompt_parts.append(f"Дополнительные элементы: {custom_elements}")
 
         return "\n".join(prompt_parts)
 
@@ -172,7 +172,7 @@ class CoverGenerator:
         self,
         title: str,
         description: Optional[str] = None,
-        count: int = 4,
+        count: int = 9,
         styles: Optional[List[str]] = None,
         custom_prompts: Optional[List[str]] = None,
         output_dir: Optional[Path] = None,
@@ -185,7 +185,7 @@ class CoverGenerator:
         Args:
             title: Video title
             description: Video description (optional)
-            count: Number of covers to generate (1-4)
+            count: Number of covers to generate (1-9)
             styles: List of styles to use (or auto-select if None)
             custom_prompts: Use custom prompts instead of generated ones
             output_dir: Directory to save images
@@ -197,8 +197,8 @@ class CoverGenerator:
         """
         logger.info(f"Generating {count} covers, model={self.model}")
 
-        if not 1 <= count <= 4:
-            raise ValueError("Cover count must be between 1 and 4")
+        if not 1 <= count <= 9:
+            raise ValueError("Cover count must be between 1 and 9")
 
         if output_dir is None:
             output_dir = Path('tmp/thumbnails')
@@ -209,7 +209,7 @@ class CoverGenerator:
             prompts = custom_prompts[:count]
         else:
             if styles is None:
-                default_styles = ['modern', 'cinematic', 'vibrant', 'creative']
+                default_styles = ['modern', 'cinematic', 'vibrant', 'professional', 'creative', 'dark', 'bright', 'tech', 'cozy']
                 styles = default_styles[:count]
             else:
                 styles = styles[:count]
@@ -282,7 +282,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate YouTube cover images')
     parser.add_argument('title', help='Video title')
     parser.add_argument('--description', '-d', help='Video description')
-    parser.add_argument('--count', '-c', type=int, default=4, help='Number of covers (1-4)')
+    parser.add_argument('--count', '-c', type=int, default=9, help='Number of covers (1-9)')
     parser.add_argument('--styles', '-s', nargs='+', help='Styles to use')
     parser.add_argument('--output', '-o', type=Path, help='Output directory')
     parser.add_argument('--reference', '-r', help='Reference image path (e.g. avatar)')

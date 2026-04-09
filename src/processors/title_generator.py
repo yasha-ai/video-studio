@@ -229,65 +229,63 @@ Return ONLY the {count} improved titles, one per line, numbered 1-{count}.
         
         # Style-specific instructions
         style_instructions = {
-            'engaging': 'Use power words, emotional triggers, and curiosity gaps. Make viewers WANT to click.',
-            'professional': 'Use clear, direct language. Focus on value proposition and expertise.',
-            'educational': 'Highlight learning outcomes. Use "How to", "Learn", "Guide" patterns.',
-            'viral': 'Maximize curiosity and emotional appeal. Use numbers, questions, or bold claims (but stay accurate).'
+            'engaging': 'Используй сильные слова, эмоциональные триггеры и интригу. Зритель должен ХОТЕТЬ кликнуть.',
+            'professional': 'Чёткий, прямой язык. Фокус на пользе и экспертизе.',
+            'educational': 'Подчеркни результат обучения. Используй паттерны "Как сделать", "Гайд", "Разбираем".',
+            'viral': 'Максимум интриги и эмоций. Числа, вопросы, смелые утверждения (но без обмана).'
         }
-        
+
         instruction = style_instructions.get(style, style_instructions['engaging'])
-        
+
         # Build prompt
         prompt_parts = [
-            f"Generate {count} optimized YouTube video titles.",
+            f"Сгенерируй {count} оптимизированных заголовков для YouTube-видео НА РУССКОМ ЯЗЫКЕ.",
             "",
-            f"STYLE: {style.upper()}",
-            f"INSTRUCTIONS: {instruction}",
+            f"СТИЛЬ: {style.upper()}",
+            f"ИНСТРУКЦИЯ: {instruction}",
             "",
-            "REQUIREMENTS:",
-            "- 50-60 characters (optimal length)",
-            "- Front-load important keywords",
-            "- Include numbers if relevant",
-            "- Be accurate and non-clickbait",
-            "- Optimize for SEO and CTR",
-            "- IMPORTANT: Generate titles in the SAME LANGUAGE as the transcript/description below.",
-            "  If the content is in Russian, titles MUST be in Russian (IT terms like TypeScript, React can stay in English).",
-            "- NEVER use angle brackets < > ! YouTube treats them as HTML and removes them.",
-            "  Write Generic(T) instead of Generic<T>, Array string instead of Array<string>.",
+            "ТРЕБОВАНИЯ:",
+            "- 50-60 символов (оптимальная длина)",
+            "- Ключевые слова в начале заголовка",
+            "- Используй числа, если уместно",
+            "- Без кликбейта, только точная информация",
+            "- Оптимизируй для SEO и CTR",
+            "- ОБЯЗАТЕЛЬНО: заголовки НА РУССКОМ ЯЗЫКЕ. IT-термины (TypeScript, React, Git, API и т.д.) оставляй на английском.",
+            "- НИКОГДА не используй угловые скобки < > ! YouTube удаляет их как HTML.",
+            "  Вместо Generic<T> пиши Generic(T), вместо Array<string> — Array string.",
         ]
-        
+
         if transcript:
             # Use first 1000 chars of transcript
-            snippet = transcript[:1000] + ("..." if len(transcript) > 1000 else "")
             prompt_parts.extend([
                 "",
-                "VIDEO CONTENT (transcript):",
-                snippet
+                "КОНТЕНТ ВИДЕО (транскрипт):",
+                transcript
             ])
-        
+
         if description:
             prompt_parts.extend([
                 "",
-                "VIDEO DESCRIPTION:",
+                "ОПИСАНИЕ ВИДЕО:",
                 description[:500]
             ])
-        
+
         if keywords:
             prompt_parts.extend([
                 "",
-                f"TARGET KEYWORDS: {', '.join(keywords)}"
+                f"КЛЮЧЕВЫЕ СЛОВА: {', '.join(keywords)}"
             ])
-        
+
         if target_audience:
             prompt_parts.extend([
                 "",
-                f"TARGET AUDIENCE: {target_audience}"
+                f"ЦЕЛЕВАЯ АУДИТОРИЯ: {target_audience}"
             ])
-        
+
         prompt_parts.extend([
             "",
-            f"Return ONLY {count} titles, one per line, numbered 1-{count}.",
-            "Do not include explanations or additional text."
+            f"Верни ТОЛЬКО {count} заголовков, по одному на строку, пронумерованных 1-{count}.",
+            "Без пояснений и дополнительного текста."
         ])
         
         return "\n".join(prompt_parts)
@@ -302,58 +300,57 @@ Return ONLY the {count} improved titles, one per line, numbered 1-{count}.
         """Build prompt for title critique."""
         
         prompt_parts = [
-            "Critique this YouTube video title and provide detailed feedback.",
+            "Оцени заголовок YouTube-видео и дай подробную обратную связь НА РУССКОМ ЯЗЫКЕ.",
             "",
-            f'TITLE: "{title}"',
+            f'ЗАГОЛОВОК: "{title}"',
             "",
-            "Analyze the title based on:",
-            "1. SEO optimization (keyword placement, searchability)",
-            "2. Engagement potential (clickability, curiosity, emotional appeal)",
-            "3. Length (optimal is 50-60 characters)",
-            "4. Clarity (clear value proposition)",
-            "5. Accuracy (no misleading clickbait)",
+            "Проанализируй заголовок по критериям:",
+            "1. SEO-оптимизация (позиция ключевых слов, поисковая видимость)",
+            "2. Потенциал вовлечения (кликабельность, интрига, эмоциональный отклик)",
+            "3. Длина (оптимально 50-60 символов)",
+            "4. Ясность (понятное ценностное предложение)",
+            "5. Точность (без обманчивого кликбейта)",
             "",
-            "Provide your critique in this format:",
+            "Ответ СТРОГО в этом формате (ключи на английском, значения на русском):",
             "",
             "SCORE: [0-100]",
             "SEO_SCORE: [0-100]",
             "ENGAGEMENT_SCORE: [0-100]",
             "",
             "STRENGTHS:",
-            "- [strength 1]",
-            "- [strength 2]",
+            "- [сильная сторона 1]",
+            "- [сильная сторона 2]",
             "...",
             "",
             "WEAKNESSES:",
-            "- [weakness 1]",
-            "- [weakness 2]",
+            "- [слабая сторона 1]",
+            "- [слабая сторона 2]",
             "...",
             "",
             "SUGGESTIONS:",
-            "- [suggestion 1]",
-            "- [suggestion 2]",
+            "- [предложение 1]",
+            "- [предложение 2]",
             "..."
         ]
-        
+
         if transcript:
-            snippet = transcript[:500] + ("..." if len(transcript) > 500 else "")
             prompt_parts.extend([
                 "",
-                "VIDEO CONTENT (for context):",
-                snippet
+                "КОНТЕНТ ВИДЕО (для контекста):",
+                transcript
             ])
-        
+
         if description:
             prompt_parts.extend([
                 "",
-                "VIDEO DESCRIPTION:",
+                "ОПИСАНИЕ ВИДЕО:",
                 description[:300]
             ])
-        
+
         if keywords:
             prompt_parts.extend([
                 "",
-                f"TARGET KEYWORDS: {', '.join(keywords)}"
+                f"КЛЮЧЕВЫЕ СЛОВА: {', '.join(keywords)}"
             ])
         
         return "\n".join(prompt_parts)

@@ -98,6 +98,15 @@ L = {
     "generate_titles": "Сгенерировать заголовки",
     "choose_title": "Выберите заголовок",
     "critique_titles": "Оценить все заголовки",
+    "overall": "Общий",
+    "seo": "SEO",
+    "engagement": "Вовлечение",
+    "strengths": "Сильные стороны",
+    "weaknesses": "Слабые стороны",
+    "suggestions": "Рекомендации",
+    "copy": "Копировать",
+    "wait_transcription_titles": "Заголовки будут сгенерированы на основе транскрипции.\nПожалуйста, подождите или перейдите к шагу 03.",
+    "wait_transcription_thumbs": "Обложки используют транскрипцию для лучших промптов.\nПожалуйста, подождите.",
 
     # Thumbnail panel
     "thumbnail_generator": "Генератор обложек",
